@@ -167,6 +167,83 @@ device->CreateRenderTargetView(renderTargetTexture, nullptr, &renderTargetView);
 - 미니맵 렌더링
 - 큐브맵 생성
 
+#### 프레임 버퍼 렌더 타겟 뷰
+SwapChain의 백 버퍼를 사용하여 화면에 직접 렌더링할 때 사용합니다.
+
+```cpp
+// 1. SwapChain으로부터 백 버퍼 텍스처 얻기
+ID3D11Texture2D* backBuffer = nullptr;
+HRESULT hr = swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backBuffer);
+if (FAILED(hr)) {
+    // 에러 처리
+    return false;
+}
+
+// 2. 백 버퍼로부터 렌더 타겟 뷰 생성
+ID3D11RenderTargetView* frameBufferRTV = nullptr;
+hr = device->CreateRenderTargetView(backBuffer, nullptr, &frameBufferRTV);
+backBuffer->Release(); // 텍스처 참조 해제 (RTV가 참조를 가지고 있음)
+
+if (FAILED(hr)) {
+    // 에러 처리
+    return false;
+}
+
+// 3. 깊이-스텐실 버퍼도 함께 생성 (일반적으로 필요)
+D3D11_TEXTURE2D_DESC depthStencilDesc = {};
+depthStencilDesc.Width = windowWidth;
+depthStencilDesc.Height = windowHeight;
+depthStencilDesc.MipLevels = 1;
+depthStencilDesc.ArraySize = 1;
+depthStencilDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;  // 24비트 깊이 + 8비트 스텐실
+depthStencilDesc.SampleDesc.Count = 1;
+depthStencilDesc.SampleDesc.Quality = 0;
+depthStencilDesc.Usage = D3D11_USAGE_DEFAULT;
+depthStencilDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+
+ID3D11Texture2D* depthStencilTexture = nullptr;
+device->CreateTexture2D(&depthStencilDesc, nullptr, &depthStencilTexture);
+
+ID3D11DepthStencilView* depthStencilView = nullptr;
+device->CreateDepthStencilView(depthStencilTexture, nullptr, &depthStencilView);
+depthStencilTexture->Release();
+
+// 4. 렌더 타겟과 깊이-스텐실 뷰를 파이프라인에 바인딩
+deviceContext->OMSetRenderTargets(1, &frameBufferRTV, depthStencilView);
+```
+
+**프레임 버퍼 RTV의 특징:**
+- **직접 화면 출력**: SwapChain과 연결되어 사용자가 실제로 보는 화면
+- **더블 버퍼링**: 백 버퍼에 그리고 Present()로 프론트 버퍼와 교체
+- **윈도우 크기 종속**: 윈도우 크기가 변경되면 재생성 필요
+
+**윈도우 크기 변경 시 처리:**
+```cpp
+void OnWindowResize(int newWidth, int newHeight) {
+    // 기존 뷰들 해제
+    if (frameBufferRTV) {
+        frameBufferRTV->Release();
+        frameBufferRTV = nullptr;
+    }
+    if (depthStencilView) {
+        depthStencilView->Release();
+        depthStencilView = nullptr;
+    }
+    
+    // SwapChain 백 버퍼 크기 조정
+    swapChain->ResizeBuffers(0, newWidth, newHeight, DXGI_FORMAT_UNKNOWN, 0);
+    
+    // 새로운 크기로 렌더 타겟 뷰 재생성
+    CreateFrameBufferRTV();
+    CreateDepthStencilView(newWidth, newHeight);
+}
+```
+
+**사용 시나리오:**
+- **메인 렌더링**: 게임의 최종 화면 출력
+- **UI 렌더링**: 사용자 인터페이스 요소들
+- **최종 후처리**: 모든 효과가 적용된 최종 이미지
+
 ### 3. 셰이더(Shader) 리소스
 
 #### 정점 셰이더(Vertex Shader)
