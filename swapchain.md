@@ -427,19 +427,190 @@ void Render() {
 }
 ```
 
+## VSync (수직 동기화) 이해하기
+
+### VSync란 무엇인가?
+
+**VSync (Vertical Synchronization, 수직 동기화)** 는 GPU의 프레임 출력 속도를 모니터의 주사율(Refresh Rate)에 맞추는 기술입니다.
+
+#### 모니터의 화면 갱신 방식
+모니터는 화면을 **위에서 아래로 한 줄씩** 그려나갑니다:
+
+```
+모니터 화면 갱신 과정 (60Hz 모니터 기준):
+┌─────────────────┐  ← 1번째 줄 그리기 시작
+│█████████████████│  
+│█████████████████│  ← 현재 여기까지 그림
+│                 │  ← 아직 그리지 않은 부분
+│                 │
+│                 │
+└─────────────────┘
+      ↓
+약 16.67ms 후 한 프레임 완성
+      ↓
+다시 맨 위부터 새로운 프레임 그리기 시작
+```
+
+#### Screen Tearing이 발생하는 이유
+
+VSync가 없으면 GPU와 모니터가 **각자의 속도**로 동작합니다:
+
+```
+모니터가 화면 중간을 그리는 중에 GPU가 새로운 프레임을 보냄:
+
+┌─────────────────┐
+│ 이전 프레임      │  ← 모니터가 아직 그리고 있던 부분
+│─────────────────│  ← 갑자기 새로운 프레임으로 바뀜!
+│ 새로운 프레임    │  ← 화면이 찢어져 보임 (Tearing)
+│                 │
+└─────────────────┘
+```
+
+**왜 이런 일이 발생할까?**
+- GPU: "새 프레임 완성! 바로 보내자!" (예: 120fps)
+- 모니터: "아직 이전 프레임 그리는 중인데..." (예: 60Hz)
+- 결과: 화면에 두 프레임이 섞여서 표시됨
+
+### VSync의 동작 원리
+
+#### VSync 켜짐 (Present(1, 0))
+```cpp
+swapChain->Present(1, 0);  // VSync 활성화
+```
+
+VSync가 켜지면 GPU가 모니터의 **수직 귀선(V-Blank)** 신호를 기다립니다:
+
+```
+시간 흐름 →
+모니터: [프레임1 그리기] [V-Blank] [프레임2 그리기] [V-Blank] [프레임3 그리기]
+GPU:    [대기...]        [Present] [대기...]        [Present] [대기...]
+                          ↑                          ↑
+                      안전한 교체 시점           안전한 교체 시점
+```
+
+**V-Blank(수직 귀선)란?**
+- 모니터가 한 프레임을 다 그리고 다음 프레임을 시작하기 전의 짧은 공백 시간
+- 이 시간에 백버퍼를 교체해야 화면이 찢어지지 않음
+
+#### VSync 꺼짐 (Present(0, 0))
+```cpp
+swapChain->Present(0, 0);  // VSync 비활성화
+```
+
+VSync가 꺼지면 GPU가 언제든지 프레임을 보냅니다:
+
+```
+시간 흐름 →
+모니터: [프레임1 그리기중...] [계속 그리기...] [프레임1 완성]
+GPU:    [Present] [Present] [Present] [Present] [Present]
+         ↑         ↑         ↑         ↑         ↑
+      즉시 교체  즉시 교체  즉시 교체   즉시 교체  즉시 교체
+      (Tearing 위험)
+```
+
+### VSync 사용 vs 미사용 비교
+
+#### VSync 사용 시 (SyncInterval = 1)
+
+**장점:**
+- **화면 찢어짐 없음**: 항상 완전한 프레임만 표시
+- **일정한 프레임율**: 모니터 주사율과 동일 (60Hz → 60fps)
+- **부드러운 화면**: 시각적으로 더 안정적
+
+**단점:**
+- **입력 지연**: GPU가 V-Blank를 기다려야 함
+- **성능 제한**: GPU가 아무리 빨라도 모니터 주사율 이상 불가능
+
+```cpp
+// 60Hz 모니터에서 VSync 켜진 상태
+GPU 성능: 200fps 가능
+실제 출력: 60fps (모니터 주사율에 제한)
+지연 시간: +16.67ms (최대 1프레임 대기)
+```
+
+#### VSync 미사용 시 (SyncInterval = 0)
+
+**장점:**
+- **최소 지연시간**: GPU가 즉시 프레임 출력
+- **최대 성능**: GPU 성능을 100% 활용
+- **높은 반응성**: 게임 입력이 더 빠르게 반영
+
+**단점:**
+- **Screen Tearing**: 화면이 찢어져 보임
+- **불규칙한 프레임율**: GPU 로드에 따라 계속 변화
+- **시각적 불안정**: 화면이 고르지 못함
+
+```cpp
+// 60Hz 모니터에서 VSync 꺼진 상태
+GPU 성능: 200fps 가능
+실제 출력: 200fps (GPU 최대 성능)
+지연 시간: 최소 (5ms 정도)
+부작용: Screen Tearing 발생
+```
+
+### 2x VSync와 특수 모드
+
+#### 2x VSync (SyncInterval = 2)
+```cpp
+swapChain->Present(2, 0);  // 2 VSync - 30fps로 제한
+```
+
+2번의 V-Blank를 기다리므로 프레임율이 절반으로 줄어듭니다:
+
+```
+60Hz 모니터에서:
+V-Blank: |-----|-----|-----|-----|-----|-----|
+Present:   △       △       △       △     (30fps)
+```
+
+**언제 사용할까?**
+- GPU가 60fps를 안정적으로 유지하지 못할 때
+- 60fps와 30fps 사이에서 계속 변동하는 것보다 안정적인 30fps가 나을 때
+
+#### 논블로킹 모드 (DXGI_PRESENT_DO_NOT_WAIT)
+```cpp
+swapChain->Present(1, DXGI_PRESENT_DO_NOT_WAIT);
+```
+
+V-Blank를 기다리되, 너무 오래 걸리면 포기하고 즉시 반환:
+
+```cpp
+HRESULT hr = swapChain->Present(1, DXGI_PRESENT_DO_NOT_WAIT);
+if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+    // V-Blank를 기다리지 않고 즉시 반환됨
+    // 이 프레임은 건너뛰고 다음 프레임 준비
+}
+```
+
+### 실제 성능 측정 예시
+
+```cpp
+// VSync 켜짐 (60Hz 모니터)
+Frame 1: 16.67ms (60fps)
+Frame 2: 16.67ms (60fps)  
+Frame 3: 16.67ms (60fps)
+→ 일정하지만 지연 있음
+
+// VSync 꺼짐 (강력한 GPU)
+Frame 1: 5ms (200fps)
+Frame 2: 4ms (250fps)
+Frame 3: 6ms (167fps)
+→ 빠르지만 불규칙, Tearing 발생
+```
+
 ## Present() 함수의 옵션
 
 ### SyncInterval (첫 번째 매개변수)
 ```cpp
-swapChain->Present(0, 0);  // VSync 끄기 - 최대한 빠르게
-swapChain->Present(1, 0);  // VSync 켜기 - 모니터 주사율에 맞춤
+swapChain->Present(0, 0);  // VSync 끄기 - 최대한 빠르게, Tearing 가능
+swapChain->Present(1, 0);  // VSync 켜기 - 모니터 주사율에 맞춤, 안정적
 swapChain->Present(2, 0);  // 2 VSync - 30fps로 제한 (60Hz 모니터에서)
 ```
 
 ### Flags (두 번째 매개변수)
 ```cpp
-swapChain->Present(1, 0);                           // 일반 모드
-swapChain->Present(1, DXGI_PRESENT_DO_NOT_WAIT);    // 논블로킹 모드
+swapChain->Present(1, 0);                           // 일반 VSync 모드
+swapChain->Present(1, DXGI_PRESENT_DO_NOT_WAIT);    // 논블로킹 VSync 모드
 ```
 
 ## 전체화면 vs 창모드
