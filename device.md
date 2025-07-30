@@ -360,6 +360,328 @@ if (vertexShader) vertexShader->Release();
 - 상태 객체는 필요한 조합만 미리 생성해서 재사용
 - 상수 버퍼는 크기별로 풀(Pool)을 만들어 관리
 
+## Device의 CreateBuffer 내부 동작 과정
+
+`device->CreateBuffer()`를 호출하면 내부적으로 어떤 일이 일어날까요? 이 과정을 이해하면 GPU 메모리 관리와 성능 최적화에 대한 깊은 통찰을 얻을 수 있습니다.
+
+### CreateBuffer 호출 시 전체 흐름
+
+```cpp
+// 사용자 코드
+ID3D11Buffer* vertexBuffer;
+HRESULT hr = device->CreateBuffer(&bufferDesc, &initData, &vertexBuffer);
+```
+
+이 한 줄의 코드 뒤에서는 복잡한 과정들이 순차적으로 진행됩니다:
+
+```
+1. CPU 측 검증 및 준비 (DirectX Runtime)
+   ↓
+2. GPU 드라이버와 통신 (WDDM)
+   ↓  
+3. GPU 메모리 할당
+   ↓
+4. 데이터 전송 (initData가 있는 경우)
+   ↓
+5. DirectX 객체 생성 및 반환
+```
+
+### 단계별 상세 과정
+
+#### 1단계: CPU 측 검증 및 최적화 (DirectX Runtime)
+
+```cpp
+// DirectX Runtime 내부에서 수행되는 검증 (의사코드)
+bool ValidateBufferDesc(const D3D11_BUFFER_DESC* desc) {
+    // 크기 검증
+    if (desc->ByteWidth == 0 || desc->ByteWidth > MAX_BUFFER_SIZE) {
+        return false;
+    }
+    
+    // Usage와 CPUAccessFlags 조합 검증
+    if (desc->Usage == D3D11_USAGE_IMMUTABLE && desc->CPUAccessFlags != 0) {
+        return false; // IMMUTABLE은 CPU 접근 불가
+    }
+    
+    // BindFlags 유효성 검증
+    if (desc->BindFlags == 0) {
+        return false; // 최소 하나의 바인딩 플래그 필요
+    }
+    
+    return true;
+}
+```
+
+**이 단계에서 하는 일:**
+- 파라미터 유효성 검사
+- 메모리 정렬 요구사항 계산 (16바이트 경계 등)
+- 최적의 메모리 타입 결정
+- GPU 드라이버에 전달할 명령 구성
+
+#### 2단계: GPU 드라이버 통신 (WDDM)
+
+DirectX Runtime이 Windows Display Driver Model (WDDM)을 통해 GPU 드라이버와 통신합니다:
+
+```cpp
+// 의사코드: 드라이버 통신 과정
+struct DriverCommand {
+    CommandType type = CREATE_BUFFER;
+    BufferCreateInfo info;
+    MemoryRequirements memReq;
+};
+
+// GPU 드라이버에게 버퍼 생성 요청
+HRESULT SubmitToDriver(DriverCommand& cmd) {
+    // 1. 드라이버 큐에 명령 추가
+    driverCommandQueue.Push(cmd);
+    
+    // 2. GPU와 동기화 (필요시)
+    if (requiresImmediateExecution) {
+        WaitForGPUIdle();
+    }
+    
+    return S_OK;
+}
+```
+
+#### 3단계: GPU 메모리 할당 결정
+
+GPU 드라이버는 Usage 플래그에 따라 메모리 위치를 결정합니다:
+
+##### D3D11_USAGE_DEFAULT
+```cpp
+// GPU 전용 메모리 (VRAM)에 할당
+Location: GPU Local Memory (VRAM)
+Access: GPU 읽기/쓰기 최적화
+Bandwidth: 최고 (500+ GB/s)
+Latency: 최저
+
+메모리 레이아웃:
+┌─────────────────────┐
+│    시스템 RAM       │  ← CPU가 직접 접근
+├─────────────────────┤
+│    PCIe Bus         │  ← 데이터 전송 경로
+├─────────────────────┤
+│    GPU VRAM         │  ← 버퍼가 여기에 생성 ★
+│  ┌───────────────┐  │
+│  │ Vertex Buffer │  │
+│  └───────────────┘  │
+└─────────────────────┘
+```
+
+##### D3D11_USAGE_DYNAMIC
+```cpp
+// 시스템 메모리 또는 GPU의 업로드 힙에 할당
+Location: System RAM + GPU Upload Heap
+Access: CPU 쓰기, GPU 읽기 최적화
+Bandwidth: 중간 (30-50 GB/s)
+Update Frequency: 매 프레임 가능
+
+메모리 레이아웃:
+┌─────────────────────┐
+│   시스템 RAM        │  ← CPU가 여기에 쓰기
+│ ┌─────────────────┐ │
+│ │ Dynamic Buffer  │ │  ★ 버퍼가 여기에 생성
+│ └─────────────────┘ │
+├─────────────────────┤
+│   GPU Upload Heap   │  ← GPU가 여기서 읽기
+│ ┌─────────────────┐ │
+│ │   Shadow Copy   │ │
+│ └─────────────────┘ │
+└─────────────────────┘
+```
+
+##### D3D11_USAGE_STAGING
+```cpp
+// 시스템 메모리에 할당 (GPU-CPU 데이터 교환용)
+Location: System RAM
+Access: CPU 읽기/쓰기, GPU 복사 작업만
+Bandwidth: 낮음 (10-20 GB/s)
+Purpose: 데이터 교환 중계소
+
+메모리 레이아웃:
+┌─────────────────────┐
+│   시스템 RAM        │
+│ ┌─────────────────┐ │  ★ 버퍼가 여기에 생성
+│ │ Staging Buffer  │ │  ← CPU와 GPU 모두 접근 가능
+│ └─────────────────┘ │
+└─────────────────────┘
+        ↕ (복사 작업)
+┌─────────────────────┐
+│    GPU VRAM         │
+│ ┌─────────────────┐ │
+│ │ Target Buffer   │ │
+│ └─────────────────┘ │
+└─────────────────────┘
+```
+
+#### 4단계: 초기 데이터 전송 (initData가 있는 경우)
+
+`D3D11_SUBRESOURCE_DATA* initData`가 제공된 경우:
+
+```cpp
+if (initData != nullptr) {
+    // 전송 방법은 메모리 타입에 따라 달라짐
+    
+    if (usage == D3D11_USAGE_DEFAULT) {
+        // GPU VRAM으로 직접 업로드
+        UploadToGPUMemory(initData->pSysMem, bufferSize);
+    }
+    else if (usage == D3D11_USAGE_DYNAMIC) {
+        // 시스템 메모리에 복사
+        memcpy(systemBuffer, initData->pSysMem, bufferSize);
+    }
+}
+```
+
+##### DEFAULT 버퍼 초기화 과정
+```
+1. CPU 메모리에서 GPU 업로드 힙으로 복사
+   [시스템 RAM] → [GPU Upload Heap]
+   
+2. GPU 내부에서 업로드 힙에서 VRAM으로 복사
+   [GPU Upload Heap] → [GPU VRAM]
+   
+3. 업로드 힙 메모리 해제
+   [GPU Upload Heap] (해제됨)
+```
+
+#### 5단계: DirectX 객체 생성
+
+마지막으로 DirectX Runtime이 관리 객체를 생성합니다:
+
+```cpp
+// 의사코드: DirectX 버퍼 객체 생성
+class D3D11Buffer : public ID3D11Buffer {
+private:
+    void* gpuMemoryHandle;      // GPU 메모리 핸들
+    UINT size;                  // 버퍼 크기
+    D3D11_USAGE usage;         // 사용법
+    UINT bindFlags;            // 바인딩 플래그
+    
+public:
+    // 참조 카운팅으로 메모리 관리
+    ULONG AddRef() override;
+    ULONG Release() override;
+};
+
+// 사용자에게 반환되는 포인터
+*ppBuffer = new D3D11Buffer(gpuMemoryHandle, bufferDesc);
+```
+
+### 메모리 타입별 성능 특성
+
+#### GPU 메모리 계층 구조
+```
+CPU 관점에서의 접근 속도:
+┌─────────────────────┐  ← 가장 빠름 (CPU 기준)
+│   CPU Cache         │
+├─────────────────────┤
+│   시스템 RAM        │  ← DYNAMIC/STAGING 버퍼 위치
+├─────────────────────┤
+│   PCIe Bus          │  ← 병목 지점 (16-32 GB/s)
+├─────────────────────┤
+│   GPU VRAM          │  ← DEFAULT 버퍼 위치
+└─────────────────────┘  ← CPU가 직접 접근 불가
+
+GPU 관점에서의 접근 속도:
+┌─────────────────────┐  ← 가장 빠름 (GPU 기준)
+│   GPU Cache         │
+├─────────────────────┤
+│   GPU VRAM          │  ← DEFAULT 버퍼 위치
+├─────────────────────┤
+│   PCIe Bus          │  ← 병목 지점
+├─────────────────────┤
+│   시스템 RAM        │  ← DYNAMIC/STAGING 버퍼 위치
+└─────────────────────┘  ← 가장 느림 (GPU 기준)
+```
+
+#### 실제 성능 수치 (대략적)
+
+| 메모리 타입 | GPU→메모리 대역폭 | CPU→메모리 대역폭 | 지연시간 (GPU) |
+|-------------|-------------------|-------------------|----------------|
+| **GPU VRAM** | 500-1000 GB/s | 접근 불가 | 1-2 ns |
+| **시스템 RAM** | 30-50 GB/s | 50-100 GB/s | 100-500 ns |
+| **PCIe 전송** | 16-32 GB/s | 16-32 GB/s | 1-10 μs |
+
+### 버퍼 타입별 최적 사용 시나리오
+
+#### Usage별 권장 사용법
+
+```cpp
+// 정적 데이터 (모델의 정점 정보)
+D3D11_USAGE_DEFAULT + D3D11_CPU_ACCESS_NONE
+→ GPU VRAM에 생성, 최고 렌더링 성능
+
+// 매 프레임 변하는 데이터 (변환 행렬)
+D3D11_USAGE_DYNAMIC + D3D11_CPU_ACCESS_WRITE  
+→ 시스템 RAM에 생성, CPU 업데이트 용이
+
+// 데이터 읽기/디버깅용
+D3D11_USAGE_STAGING + D3D11_CPU_ACCESS_READ
+→ 시스템 RAM에 생성, GPU→CPU 데이터 전송 가능
+```
+
+### 성능 최적화 팁
+
+#### 1. 배치 생성 (Batch Creation)
+```cpp
+// 비효율적: 개별 생성
+for (int i = 0; i < 1000; i++) {
+    device->CreateBuffer(&desc, &data[i], &buffers[i]);  // 1000번의 드라이버 호출
+}
+
+// 효율적: 큰 버퍼 하나 생성 후 서브버퍼 사용
+device->CreateBuffer(&bigDesc, &allData, &bigBuffer);   // 1번의 드라이버 호출
+```
+
+#### 2. 메모리 타입 선택
+```cpp
+// 자주 변하는 데이터는 DYNAMIC
+constantBufferDesc.Usage = D3D11_USAGE_DYNAMIC;     // 매 프레임 업데이트
+
+// 정적 데이터는 DEFAULT  
+vertexBufferDesc.Usage = D3D11_USAGE_DEFAULT;       // 한 번 설정 후 변경 없음
+```
+
+#### 3. 초기 데이터 제공
+```cpp
+// 가능하면 생성 시 데이터 제공 (복사 횟수 최소화)
+device->CreateBuffer(&desc, &initData, &buffer);    // 권장
+
+// 보다는
+device->CreateBuffer(&desc, nullptr, &buffer);      // 피할 것
+context->UpdateSubresource(buffer, 0, nullptr, data, 0, 0);  // 추가 복사
+```
+
+### 메모리 누수 방지
+
+```cpp
+// RAII 패턴 사용 권장
+class BufferManager {
+private:
+    std::vector<ID3D11Buffer*> buffers;
+    
+public:
+    ~BufferManager() {
+        // 자동으로 모든 버퍼 해제
+        for (auto* buffer : buffers) {
+            if (buffer) buffer->Release();
+        }
+    }
+    
+    ID3D11Buffer* CreateBuffer(const D3D11_BUFFER_DESC& desc, 
+                              const D3D11_SUBRESOURCE_DATA* data = nullptr) {
+        ID3D11Buffer* buffer = nullptr;
+        HRESULT hr = device->CreateBuffer(&desc, data, &buffer);
+        if (SUCCEEDED(hr)) {
+            buffers.push_back(buffer);
+        }
+        return buffer;
+    }
+};
+```
+
 ## Device vs Device Context
 
 DirectX 11에서는 Device를 두 부분으로 나눴습니다:
