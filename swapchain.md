@@ -26,33 +26,172 @@
 
 ## 스왑 체인의 구조
 
+### BitBlt 모델 구조 (DISCARD, SEQUENTIAL)
 ```
+더블 버퍼링 (BufferCount = 1):
+┌─────────────────┐    Present()    ┌─────────────────┐
+│   Back Buffer   │ -------------> │   Front Buffer  │
+│   (GPU가 그림)   │     복사       │  (화면에 표시)   │ ← 별도 존재
+└─────────────────┘                └─────────────────┘
+   BufferCount=1                        시스템 관리
+
+트리플 버퍼링 (BufferCount = 2):
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Back Buffer   │ -> │  Back Buffer    │ -> │   Front Buffer  │
-│   (그리는 중)    │    │   (대기 중)      │    │  (화면에 표시)   │
+│   Back Buffer 1 │    │   Back Buffer 2 │    │   Front Buffer  │
+│   (GPU가 그림)   │    │   (대기 중)      │    │  (화면에 표시)   │ ← 별도 존재
 └─────────────────┘    └─────────────────┘    └─────────────────┘
          ↑                       ↑                       ↓
-    GPU가 여기에            다음에 표시될              지금 화면에
-      그림을 그림              이미지                   보이는 이미지
+    GPU가 여기에            다음에 렌더링할           지금 화면에
+      그림을 그림              버퍼                   보이는 이미지
+```
+
+### FLIP 모델 구조 (FLIP_SEQUENTIAL, FLIP_DISCARD)
+```
+더블 버퍼링 (BufferCount = 2):
+┌─────────────────┐    Present()    ┌─────────────────┐
+│  Back Buffer A  │ <------------>  │  Back Buffer B  │
+│ (현재 렌더링 중)  │     역할 교체    │(Front 역할 수행) │
+└─────────────────┘                 └─────────────────┘
+                                           ↓
+                                    실제로 화면에 표시
+                                    (별도 프론트버퍼 없음)
+
+트리플 버퍼링 (BufferCount = 3):
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│  Back Buffer A  │    │  Back Buffer B  │    │  Back Buffer C  │
+│ (현재 렌더링 중) │    │   (대기 중)      │    │(Front 역할 수행)│
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+         ↑                       ↑                       ↓
+    GPU가 여기에            다음에 렌더링할           실제로 화면에 표시
+      그림을 그림              버퍼               (별도 프론트버퍼 없음)
 ```
 
 ## 주요 구성 요소
 
 ### 1. Buffer Count (버퍼 개수)
+
+**중요**: BufferCount는 **백버퍼의 개수**만을 지정합니다. 하지만 스왑 모델에 따라 실제 버퍼링 방식이 달라집니다.
+
+#### BitBlt 모델 (DISCARD, SEQUENTIAL)
+BitBlt 모델에서는 **프론트 버퍼가 물리적으로 별도 존재**합니다:
+
 ```cpp
 DXGI_SWAP_CHAIN_DESC swapChainDesc = {};
-swapChainDesc.BufferCount = 2;  // 더블 버퍼링 (Front + Back)
-// swapChainDesc.BufferCount = 3;  // 트리플 버퍼링 (더 부드러움)
+swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;  // BitBlt 모델
+
+swapChainDesc.BufferCount = 1;  // 백버퍼 1개 → 더블 버퍼링 (프론트1 + 백1 = 총 2개)
+swapChainDesc.BufferCount = 2;  // 백버퍼 2개 → 트리플 버퍼링 (프론트1 + 백2 = 총 3개)
+swapChainDesc.BufferCount = 3;  // 백버퍼 3개 → 쿼드 버퍼링 (프론트1 + 백3 = 총 4개)
 ```
 
-- **더블 버퍼링 (2개)**: 가장 일반적, 메모리 효율적
-- **트리플 버퍼링 (3개)**: 더 부드럽지만 메모리 사용량 증가
+**BitBlt 모델 버퍼링 방식:**
+- **더블 버퍼링**: 프론트 버퍼 1개 + 백 버퍼 1개 (BufferCount = 1) ← **가장 일반적**
+- **트리플 버퍼링**: 프론트 버퍼 1개 + 백 버퍼 2개 (BufferCount = 2)
+- **쿼드 버퍼링**: 프론트 버퍼 1개 + 백 버퍼 3개 (BufferCount = 3)
+
+#### FLIP 모델 (FLIP_SEQUENTIAL, FLIP_DISCARD)
+FLIP 모델에서는 **백버퍼만 물리적으로 존재**하고, 이들이 front/back 역할을 교체합니다:
+
+```cpp
+DXGI_SWAP_CHAIN_DESC swapChainDesc = {};
+swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;  // FLIP 모델
+
+// swapChainDesc.BufferCount = 1;  // ← 불가능! FLIP 모델은 최소 2개 필요
+swapChainDesc.BufferCount = 2;  // 백버퍼 2개 → 더블 버퍼링 (백버퍼들이 front/back 역할 교체)
+swapChainDesc.BufferCount = 3;  // 백버퍼 3개 → 트리플 버퍼링 (백버퍼들이 front/back 역할 교체)
+```
+
+**FLIP 모델 버퍼링 방식:**
+- **더블 버퍼링**: 백 버퍼 2개 (BufferCount = 2) ← **FLIP 모델 최소값**
+- **트리플 버퍼링**: 백 버퍼 3개 (BufferCount = 3) ← **권장 설정**
+- **쿼드 버퍼링**: 백 버퍼 4개 (BufferCount = 4)
 
 ### 2. Buffer Format (버퍼 포맷)
+백버퍼에 저장되는 픽셀 데이터의 형식을 지정합니다.
+
+#### 포맷 이름 해석 방법
+DXGI 포맷 이름은 다음과 같은 규칙으로 구성됩니다:
+```
+DXGI_FORMAT_[컴포넌트][비트수]_[타입]
+
+예시: DXGI_FORMAT_R8G8B8A8_UNORM
+- R8: Red 채널 8비트
+- G8: Green 채널 8비트  
+- B8: Blue 채널 8비트
+- A8: Alpha 채널 8비트
+- UNORM: Unsigned Normalized (0.0~1.0 범위)
+```
+
+#### 주요 포맷 비교
+
+##### R8G8B8A8_UNORM (일반적)
 ```cpp
 swapChainDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-// R(빨강) G(초록) B(파랑) A(투명도) 각각 8비트 = 32비트 컬러
 ```
+- **메모리 레이아웃**: `[R][G][B][A]` (Red가 최하위 바이트)
+- **용도**: 대부분의 일반적인 렌더링
+- **특징**: 표준적인 RGBA 순서
+- **호환성**: 모든 GPU에서 지원
+
+##### B8G8R8A8_UNORM (Windows 최적화)
+```cpp
+swapChainDesc.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+```
+- **메모리 레이아웃**: `[B][G][R][A]` (Blue가 최하위 바이트)
+- **용도**: Windows UI, Desktop Window Manager
+- **특징**: Windows 기본 포맷 (BGR 순서)
+- **성능**: Windows에서 더 빠른 경우가 많음
+
+#### 포맷 선택 가이드
+
+```cpp
+// 일반적인 3D 렌더링
+swapChainDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+// Windows UI나 2D 렌더링 (더 빠를 수 있음)
+swapChainDesc.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+
+// HDR 렌더링 (높은 정밀도)
+swapChainDesc.BufferDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+// 메모리 절약 (알파 채널 불필요)
+swapChainDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; // 권장
+// 또는
+swapChainDesc.BufferDesc.Format = DXGI_FORMAT_B8G8R8X8_UNORM; // X는 사용 안함
+```
+
+#### 타입 설명 (Suffix)
+
+- **UNORM**: Unsigned Normalized (0~255 → 0.0~1.0)
+- **SNORM**: Signed Normalized (-128~127 → -1.0~1.0)  
+- **UINT**: Unsigned Integer (0~255 그대로)
+- **SINT**: Signed Integer (-128~127 그대로)
+- **FLOAT**: 부동소수점 (16비트 또는 32비트)
+
+#### 실제 메모리 레이아웃 비교
+
+```cpp
+// 빨간색 픽셀 (255, 0, 0, 255)을 저장할 때
+
+// R8G8B8A8_UNORM: 메모리에서 [FF][00][00][FF]
+uint32_t rgba = 0xFF0000FF; // Red=255, Green=0, Blue=0, Alpha=255
+
+// B8G8R8A8_UNORM: 메모리에서 [00][00][FF][FF]  
+uint32_t bgra = 0x0000FFFF; // Blue=0, Green=0, Red=255, Alpha=255
+```
+
+#### 성능 고려사항
+
+**R8G8B8A8_UNORM을 사용해야 하는 경우:**
+- 표준 3D 렌더링
+- OpenGL과 호환성이 필요한 경우
+- 크로스 플랫폼 개발
+
+**B8G8R8A8_UNORM을 사용해야 하는 경우:**
+- Windows 전용 애플리케이션
+- UI 렌더링이 주요 목적
+- Desktop Window Manager와의 호환성
+- Windows에서 최적화된 성능이 필요한 경우
 
 ### 3. Refresh Rate (주사율)
 ```cpp
@@ -112,55 +251,157 @@ swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 - **제한사항**: BufferCount는 최소 2 이상이어야 함
 - **사용 시기**: 최신 하드웨어와 OS에서 최고 성능이 필요한 경우
 
-## FLIP 모델에서 BufferCount가 2 이상인 이유
+## BitBlt vs FLIP 모델의 BufferCount 차이점
 
-### 전통적인 BitBlt 모델 vs FLIP 모델
+### BitBlt 모델 vs FLIP 모델 비교
 
 #### BitBlt 모델 (DISCARD, SEQUENTIAL)
 ```
 ┌─────────────┐    복사    ┌─────────────┐
-│ Back Buffer │ ---------> │Front Buffer │
-│  (앱이 그림) │            │ (화면 출력)  │
+│ Back Buffer │ ---------> │Front Buffer │ ← 물리적으로 별도 존재
+│  (앱이 그림) │            │ (화면 출력)  │   (시스템이 관리)
 └─────────────┘            └─────────────┘
-     1개만 있어도 OK          (시스템 관리)
+   BufferCount=1             별도 프론트버퍼
 ```
 - GPU가 백버퍼 내용을 프론트버퍼로 **복사**
 - 복사하는 동안 백버퍼는 사용 가능
-- BufferCount = 1이어도 동작 가능
+- **BufferCount = 1 (백버퍼 1개) = 더블 버퍼링** (프론트1 + 백1 = 총 2개)
 
 #### FLIP 모델 (FLIP_SEQUENTIAL, FLIP_DISCARD)
 ```
 ┌─────────────┐    포인터   ┌─────────────┐
-│ Buffer A    │ <--------> │ Buffer B    │
-│ (현재 출력)  │   교체     │ (다음 준비)  │
+│Back Buffer A│ <--------> │Back Buffer B│
+│ (현재 렌더링) │   교체     │(Front 역할) │
 └─────────────┘            └─────────────┘
-     최소 2개 필요 - 역할을 서로 바꿔가며 사용
+   BufferCount = 2 (백버퍼 2개) 필수
+   
+   별도의 프론트 버퍼 없음 - 백버퍼가 역할 교체
 ```
-- GPU가 버퍼들의 **포인터만 교체** (복사 없음)
-- 한 버퍼가 화면에 출력되는 동안, 다른 버퍼에 그려야 함
-- **물리적으로 최소 2개의 버퍼가 동시에 필요**
+- **백버퍼들 간의 역할만 교체** (복사 없음)
+- Present() 호출 시 백버퍼 중 하나가 front buffer 역할로 바뀜
+- **물리적으로는 모두 백버퍼**, 논리적으로만 front/back 역할 분담
+- **BufferCount = 2 (백버퍼 2개) = 더블 버퍼링** (별도 프론트버퍼 없음)
+
+**FLIP 모델의 핵심**: 별도의 프론트 버퍼가 없습니다. 대신 백버퍼들이 front/back 역할을 서로 교체합니다.
+- 렌더링 중인 백버퍼 → Present() 후 → front buffer 역할 (화면 표시)
+- front buffer 역할인 백버퍼 → Present() 후 → 렌더링용 백버퍼 역할
 
 ### 구체적인 동작 과정
 
-#### 2개 버퍼로 FLIP 동작
-```cpp
-// 초기 상태
-Buffer A: [화면에 표시 중]
-Buffer B: [GPU가 새로운 프레임 그리는 중]
+#### FLIP 모델에서 2개 백버퍼 동작 (BufferCount = 2)
 
-// Present() 호출 시
-Buffer A: [GPU가 새로운 프레임 그리는 중] ← 역할 바뀜
-Buffer B: [화면에 표시 중] ← 역할 바뀜
+**중요**: 2개 백버퍼 환경에서는 새로운 렌더링을 위해 **대기가 필요**할 수 있습니다.
+
+```cpp
+// 초기 상태 - 총 2개의 백버퍼만 존재 (별도 프론트 버퍼 없음)
+// (이전 Present() 호출로 Buffer B가 front buffer 역할 중이라고 가정)
+Back Buffer A: [GPU가 새로운 프레임 그리는 중] (렌더링 역할)
+Back Buffer B: [Front Buffer 역할] ← 화면에 표시 중, GPU 접근 불가
+
+// Present() 호출 시 - Buffer A 렌더링 완료 후 역할 교체
+Back Buffer A: [Front Buffer 역할] ← 이제 화면에 표시, GPU 접근 불가  
+Back Buffer B: [렌더링 역할] ← 이제 새로운 프레임 그리기 시작
+
+// 다음 Present() 호출 시 - Buffer B 렌더링 완료 후 역할 교체
+Back Buffer A: [렌더링 역할] ← 다시 새로운 프레임 그리기 시작
+Back Buffer B: [Front Buffer 역할] ← 다시 화면에 표시, GPU 접근 불가
+
+// 핵심: 물리적으론 모두 백버퍼, 논리적으로만 front/back 역할 교체
 ```
 
-#### 만약 1개 버퍼만 있다면?
+#### 애플리케이션 시작부터의 완전한 시나리오
+
 ```cpp
-// 불가능한 상황
-Buffer A: [화면에 표시 중] + [GPU가 그리려고 함]
-// → 동시에 두 가지 역할을 할 수 없음!
+// 1. 애플리케이션 시작 직후 (최초 상태)
+// 화면: [빈 화면 또는 이전 애플리케이션 내용]
+Back Buffer A: [사용 가능] ← 첫 번째 프레임 렌더링 시작
+Back Buffer B: [사용 가능] ← 아직 사용되지 않음
+
+// 2. 첫 번째 프레임 렌더링 완료 후 Present() 호출
+Back Buffer A: [Front Buffer 역할] ← 첫 번째 프레임이 화면에 표시
+Back Buffer B: [렌더링 역할] ← 두 번째 프레임 렌더링 시작
+
+// 3. 두 번째 프레임 렌더링 완료 후 Present() 호출  
+Back Buffer A: [렌더링 역할] ← 세 번째 프레임 렌더링 시작
+Back Buffer B: [Front Buffer 역할] ← 두 번째 프레임이 화면에 표시
+
+// 4. 이후 계속 A ↔ B 역할 교체하며 렌더링
+// → 이 상태가 앞서 설명한 "초기 상태"에 해당
 ```
+
+**핵심**: FLIP에서는 **동시 읽기/쓰기가 불가능**합니다. Front buffer 역할인 백버퍼는 
+GPU가 접근할 수 없으며, GPU는 항상 **다른 백버퍼**에 새로운 프레임을 그립니다.
+
+**BufferCount = 2의 한계**:
+- GPU가 빠르게 렌더링하면 사용 가능한 백버퍼가 없어 **대기 발생**
+- 진정한 트리플 버퍼링의 이점을 얻으려면 **BufferCount = 3 권장**
+- 2개 백버퍼는 "최소 요구사항"이지, "최적 성능"은 아님
+
+#### BufferCount = 3일 때의 이상적인 동작 (권장)
+```cpp
+// 3개 백버퍼 환경 - 항상 렌더링 가능한 버퍼 보장
+Back Buffer A: [Front Buffer 역할] ← 화면에 표시 중, GPU 접근 불가
+Back Buffer B: [렌더링 역할] ← GPU가 현재 작업 중
+Back Buffer C: [대기 역할] ← 즉시 다음 렌더링 시작 가능
+
+// Present() 후에도 항상 사용 가능한 버퍼가 1개 이상 보장됨
+// → GPU 대기 시간 최소화, 최고 성능
+```
+
+#### FLIP 모델의 정확한 동작 메커니즘
+
+```cpp
+// 상세한 Present() 동작 과정
+1. GPU가 Back Buffer A에서 렌더링 완료
+2. Present() 호출
+3. Buffer A가 Front Buffer 역할로 전환 (화면 표시 시작)
+4. Buffer A는 이제 "표시 전용" 상태 → GPU 접근 금지
+5. GPU의 새 렌더 타겟이 Buffer B로 변경
+6. GPU가 Buffer B에서 새로운 프레임 렌더링 시작
+
+// 핵심: 각 백버퍼는 한 번에 하나의 역할만 수행
+- Front Buffer 역할(표시) 중인 백버퍼: GPU 접근 불가
+- 렌더링 중인 백버퍼: 화면 표시 불가
+- 대기 중인 백버퍼: 아무도 사용하지 않음 (BufferCount ≥ 3일 때만)
+```
+
+**FLIP이 최소 2개 백버퍼를 요구하는 이유**:
+1. **역할 분리**: Front buffer 역할과 렌더링 역할이 **물리적으로 다른 백버퍼**에서 수행
+2. **동시성 보장**: 한 백버퍼는 표시 전용, 다른 백버퍼는 렌더링 전용으로 역할 분담
+3. **역할 교체 방식**: 실제 메모리 이동 없이 역할만 바뀌므로 각 백버퍼는 고정된 메모리 위치
+4. **무중단 파이프라인**: Present() 호출 후에도 즉시 새로운 프레임 렌더링 시작 가능
+
+#### 만약 백버퍼가 1개만 있다면? (BufferCount = 1)
+```cpp
+// 불가능한 상황 - FLIP 모델에서 BufferCount = 1
+Back Buffer A: [Front Buffer 역할로 화면 표시 중] + [GPU가 그리려고 함]
+// → 동시에 표시(읽기)와 렌더링(쓰기)을 할 수 없음!
+
+// FLIP 모델의 제약
+Present() 호출 시:
+1. Buffer A가 Front Buffer 역할 시작 (화면 표시, 읽기 전용 상태)
+2. GPU가 새 프레임을 그리려면 Buffer A에 써야 함
+3. 하지만 Buffer A는 표시 중이므로 쓰기 불가능!
+4. → 데드락 발생 또는 렌더링 중단
+```
+
+**FLIP에서 BufferCount = 1이 불가능한 이유**:
+- 한 백버퍼가 Front Buffer 역할(표시) 중일 때 새로운 렌더링을 할 백버퍼가 없음
+- 동시 읽기/쓰기 방지를 위해 물리적으로 분리된 백버퍼들이 필요
+- 이것이 FLIP 계열 SwapEffect에서 BufferCount ≥ 2를 강제하는 이유
 
 ### 왜 복사 대신 포인터 교체를 사용하는가?
+
+#### FLIP 모델의 정확한 동작 방식
+FLIP 모델에서는 "백버퍼가 화면에 출력된다"는 표현보다는 "백버퍼 중 하나가 front buffer 역할을 한다"가 더 정확합니다:
+
+```cpp
+// 전통적인 이해 (부정확)
+Present() → 백버퍼가 별도 프론트버퍼로 복사되어 화면에 출력
+
+// 실제 FLIP 동작 (정확)
+Present() → 백버퍼 중 하나가 front buffer 역할로 전환, 화면에 직접 표시
+```
 
 #### 성능 비교
 ```cpp
@@ -173,8 +414,8 @@ Buffer A: [화면에 표시 중] + [GPU가 그리려고 함]
 // FLIP 모델 (포인터 교체)
 1. GPU가 백버퍼에 그림
 2. Present() 호출
-3. 포인터만 교체 (거의 즉시 완료) ← 빠름!
-4. 대기 시간 거의 없음
+3. 시스템이 해당 백버퍼를 참조하도록 포인터 변경 ← 빠름!
+4. 거의 즉시 완료
 ```
 
 #### 메모리 대역폭 절약
@@ -186,67 +427,115 @@ Buffer A: [화면에 표시 중] + [GPU가 그리려고 함]
 // FLIP에서는 복사가 없으므로 대역폭 절약
 ```
 
-### 트리플 버퍼링의 장점
+### 모델별 트리플 버퍼링의 차이점
 
+#### BitBlt 모델의 트리플 버퍼링
 ```cpp
-// 더블 버퍼링 (BufferCount = 2)
-Buffer A: [화면 출력]
-Buffer B: [GPU 렌더링]
-// GPU가 빨리 끝나면 A가 교체될 때까지 대기
+// BitBlt 모델 - 더블 버퍼링 (BufferCount = 1)
+Front Buffer:  [화면 출력]     (별도 존재, 시스템 관리)
+Back Buffer:   [GPU 렌더링]    (BufferCount = 1)
+// 문제: Present() 후 GPU는 복사 완료까지 대기해야 함
 
-// 트리플 버퍼링 (BufferCount = 3)
-Buffer A: [화면 출력]
-Buffer B: [GPU 렌더링]
-Buffer C: [다음 프레임 대기]
-// GPU가 빨리 끝나면 C에서 바로 다음 프레임 시작 가능
+// BitBlt 모델 - 트리플 버퍼링 (BufferCount = 2)
+Front Buffer:   [화면 출력]      (별도 존재, 시스템 관리)
+Back Buffer 1:  [GPU 렌더링]     
+Back Buffer 2:  [대기 중]        
+// 해결: 복사 중에도 다른 백버퍼에서 렌더링 가능
 ```
+
+#### FLIP 모델의 "트리플" 버퍼링
+```cpp
+// FLIP 모델 - 더블 버퍼링 (BufferCount = 2)
+Back Buffer 1:  [Front Buffer 역할] ← 화면에 표시 중
+Back Buffer 2:  [렌더링 역할] ← GPU 작업 중
+// 문제: GPU가 빠르면 사용 가능한 백버퍼가 없어 대기 발생
+
+// FLIP 모델 - 트리플 버퍼링 (BufferCount = 3)
+Back Buffer 1:  [Front Buffer 역할] ← 화면에 표시 중
+Back Buffer 2:  [렌더링 역할] ← GPU 작업 중
+Back Buffer 3:  [대기 역할] ← 항상 사용 가능! ← 핵심!
+// 해결: 항상 사용 가능한 백버퍼 보장, GPU 대기 없음
+```
+
+**정확한 버퍼링 방식 정리**:
+
+**BitBlt 모델**:
+- **BufferCount = 1**: 더블 버퍼링 (프론트1 + 백1 = 총 2개)
+- **BufferCount = 2**: 트리플 버퍼링 (프론트1 + 백2 = 총 3개)
+- **BufferCount = 3**: 쿼드 버퍼링 (프론트1 + 백3 = 총 4개)
+
+**FLIP 모델**:
+- **BufferCount = 2**: 더블 버퍼링 (백버퍼 2개, 별도 프론트 없음)
+- **BufferCount = 3**: 트리플 버퍼링 (백버퍼 3개, 별도 프론트 없음)
+- **BufferCount = 4**: 쿼드 버퍼링 (백버퍼 4개, 별도 프론트 없음)
+
+**성능 권장사항**:
+- **BufferCount = 2**: FLIP 모델의 최소 요구사항 (대기 가능성 있음)
+- **BufferCount = 3**: 최적 성능 (대기 없는 연속 렌더링)
+- **BufferCount = 4+**: 메모리 낭비 (일반적으로 불필요)
 
 ### 실제 구현에서의 고려사항
 
 ```cpp
 // FLIP 모델 생성 시 필수 조건
 DXGI_SWAP_CHAIN_DESC swapChainDesc = {};
-swapChainDesc.BufferCount = 2;  // 최소 2개!
+swapChainDesc.BufferCount = 2;  // 백버퍼 최소 2개!
 swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 
-// 1개로 설정하면 생성 실패
+// 백버퍼를 1개로 설정하면 생성 실패
 swapChainDesc.BufferCount = 1;  // ← 이렇게 하면 에러!
 HRESULT hr = D3D11CreateDeviceAndSwapChain(...);
 // hr == DXGI_ERROR_INVALID_CALL
 ```
 
+**왜 백버퍼가 최소 2개 필요한가?**
+1. **역할 분리**: Front buffer 역할인 백버퍼와 렌더링용 백버퍼가 **물리적으로 다름**
+2. **동시성 보장**: 한 백버퍼는 표시 전용, 다른 백버퍼는 렌더링 전용으로 역할 분담
+3. **역할 교체 방식**: 실제 메모리 이동 없이 역할만 바뀌므로 각 백버퍼는 고정된 메모리 위치
+4. **무중단 파이프라인**: Present() 호출 후에도 즉시 새로운 프레임 렌더링 시작 가능
+
+**FLIP의 장점**:
+- **제로 카피**: 메모리 복사가 전혀 없어 매우 빠름
+- **즉시 완료**: 역할 교체만으로 Present() 거의 즉시 완료
+- **하드웨어 최적화**: GPU 하드웨어 레벨에서 직접 지원
+- **메모리 효율성**: 별도 프론트버퍼가 없어 메모리 절약
+
 ### 메모리 사용량 비교
 
 ```cpp
-// 1920x1080 화면 기준 메모리 사용량
-BitBlt (BufferCount=1): 8.3MB (백버퍼만)
-FLIP (BufferCount=2):  16.6MB (2개 버퍼)
-FLIP (BufferCount=3):  24.9MB (3개 버퍼)
+// 1920x1080 화면 기준 메모리 사용량 (픽셀당 4바이트)
 
-// 성능 향상을 위한 합리적인 메모리 투자
+// BitBlt 모델 (별도 프론트버퍼 존재)
+더블 버퍼링 (BufferCount=1): 8.3MB (백버퍼 1개) + 8.3MB (프론트버퍼) = 16.6MB
+트리플 버퍼링 (BufferCount=2): 16.6MB (백버퍼 2개) + 8.3MB (프론트버퍼) = 24.9MB
+
+// FLIP 모델 (백버퍼들이 역할 교체, 별도 프론트버퍼 없음)
+더블 버퍼링 (BufferCount=2): 16.6MB (백버퍼 2개만, 별도 프론트버퍼 없음)
+트리플 버퍼링 (BufferCount=3): 24.9MB (백버퍼 3개만, 별도 프론트버퍼 없음)
 ```
 
 ## SwapEffect 선택 가이드
 
-### 호환성 우선
+### 호환성 우선 (BitBlt 더블 버퍼링)
 ```cpp
 // 모든 환경에서 안정적으로 동작
 swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-swapChainDesc.BufferCount = 1;
+swapChainDesc.BufferCount = 1;  // BitBlt 더블 버퍼링 (프론트1 + 백1)
 ```
 
-### 성능과 호환성의 균형
+### 성능과 호환성의 균형 (FLIP 더블 버퍼링)
 ```cpp
 // Windows 8 이상에서 좋은 성능
 swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-swapChainDesc.BufferCount = 2;
+swapChainDesc.BufferCount = 2;  // FLIP 더블 버퍼링 (백버퍼2개, 역할 교체)
 ```
 
-### 최고 성능 (권장)
+### 최고 성능 (FLIP 더블/트리플 버퍼링)
 ```cpp
 // Windows 10 이상에서 최고 성능
 swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-swapChainDesc.BufferCount = 2;  // 또는 3 (트리플 버퍼링)
+swapChainDesc.BufferCount = 2;  // FLIP 더블 버퍼링 (최소값)
+// swapChainDesc.BufferCount = 3;  // FLIP 트리플 버퍼링 (권장, 더 부드럽지만 메모리 더 사용)
 ```
 
 ### 런타임 선택 예시
@@ -456,27 +745,38 @@ void OnWindowResize(int newWidth, int newHeight) {
 ## 성능 최적화 팁
 
 ### 1. 적절한 버퍼 개수 선택
-```cpp
-// 일반적인 경우: 더블 버퍼링
-swapChainDesc.BufferCount = 2;
 
-// 높은 성능이 필요한 경우: 트리플 버퍼링
-swapChainDesc.BufferCount = 3;
+#### BitBlt 모델 (DISCARD, SEQUENTIAL)
+```cpp
+// 기본 호환성: 더블 버퍼링
+swapChainDesc.BufferCount = 1;  // 더블 버퍼링 (프론트 1개 + 백 1개 = 총 2개)
+
+// 더 나은 성능: 트리플 버퍼링  
+swapChainDesc.BufferCount = 2;  // 트리플 버퍼링 (프론트 1개 + 백 2개 = 총 3개)
+```
+
+#### FLIP 모델 (FLIP_SEQUENTIAL, FLIP_DISCARD)
+```cpp
+// FLIP 모델 최소: 더블 버퍼링 (대기 가능성 있음)
+swapChainDesc.BufferCount = 2;  // FLIP 더블 버퍼링 (백버퍼 2개, 역할 교체)
+
+// FLIP 모델 권장: 트리플 버퍼링 (대기 없음)
+swapChainDesc.BufferCount = 3;  // FLIP 트리플 버퍼링 (백버퍼 3개, 역할 교체)
 ```
 
 ### 2. 적절한 SwapEffect 선택
 ```cpp
-// 호환성 우선 - 모든 OS에서 동작
+// 호환성 우선 - 모든 OS에서 동작 (BitBlt 더블 버퍼링)
 swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 swapChainDesc.BufferCount = 1;
 
-// 균형잡힌 성능 - Windows 8 이상
+// 균형잡힌 성능 - Windows 8 이상 (FLIP 더블 버퍼링)
 swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
 swapChainDesc.BufferCount = 2;
 
-// 최고 성능 - Windows 10 이상 (권장)
+// 최고 성능 - Windows 10 이상 (FLIP 더블 버퍼링, 트리플 권장)
 swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-swapChainDesc.BufferCount = 2;
+swapChainDesc.BufferCount = 2;  // 또는 3 (트리플 버퍼링)
 ```
 
 **성능 차이**:
