@@ -474,11 +474,11 @@ float4 color = myTexture.SampleLevel(mySampler, float2(0.5, 0.5), 2);
 float4 color = myTexture.SampleGrad(mySampler, uv, ddx_uv, ddy_uv);
 ```
 
-### 4. 세만틱(Semantics)
+### 4. 시맨틱(Semantics)
 
-세만틱은 셰이더 입출력 데이터의 의미를 DirectX에게 알려주는 키워드입니다.
+시맨틱은 셰이더 입출력 데이터의 의미를 DirectX에게 알려주는 키워드입니다.
 
-#### 정점 셰이더 입력 세만틱
+#### 정점 셰이더 입력 시맨틱
 ```hlsl
 struct VS_INPUT
 {
@@ -492,7 +492,7 @@ struct VS_INPUT
 };
 ```
 
-#### 정점 셰이더 출력 / 픽셀 셰이더 입력 세만틱
+#### 정점 셰이더 출력 / 픽셀 셰이더 입력 시맨틱
 ```hlsl
 struct VS_OUTPUT / PS_INPUT
 {
@@ -504,7 +504,7 @@ struct VS_OUTPUT / PS_INPUT
 };
 ```
 
-#### 픽셀 셰이더 출력 세만틱
+#### 픽셀 셰이더 출력 시맨틱
 ```hlsl
 struct PS_OUTPUT
 {
@@ -740,8 +740,8 @@ GPU는 메모리의 바이트 덩어리만 받기 때문에, 어떤 바이트가
 D3D11_INPUT_ELEMENT_DESC inputElements[] = {
     // 위치 데이터
     {
-        "POSITION",                          // 세만틱 이름
-        0,                                   // 세만틱 인덱스
+        "POSITION",                          // 시맨틱 이름
+        0,                                   // 시맨틱 인덱스
         DXGI_FORMAT_R32G32B32_FLOAT,        // 데이터 포맷 (float3)
         0,                                   // 입력 슬롯
         0,                                   // 바이트 오프셋
@@ -751,8 +751,8 @@ D3D11_INPUT_ELEMENT_DESC inputElements[] = {
     
     // 법선 데이터
     {
-        "NORMAL",                            // 세만틱 이름
-        0,                                   // 세만틱 인덱스
+        "NORMAL",                            // 시맨틱 이름
+        0,                                   // 시맨틱 인덱스
         DXGI_FORMAT_R32G32B32_FLOAT,        // 데이터 포맷 (float3)
         0,                                   // 입력 슬롯
         12,                                  // 바이트 오프셋 (position 다음)
@@ -762,8 +762,8 @@ D3D11_INPUT_ELEMENT_DESC inputElements[] = {
     
     // 텍스처 좌표 데이터
     {
-        "TEXCOORD",                          // 세만틱 이름
-        0,                                   // 세만틱 인덱스
+        "TEXCOORD",                          // 시맨틱 이름
+        0,                                   // 시맨틱 인덱스
         DXGI_FORMAT_R32G32_FLOAT,           // 데이터 포맷 (float2)
         0,                                   // 입력 슬롯
         24,                                  // 바이트 오프셋 (position + normal 다음)
