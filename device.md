@@ -448,6 +448,34 @@ HRESULT SubmitToDriver(DriverCommand& cmd) {
 
 GPU 드라이버는 Usage 플래그에 따라 메모리 위치를 결정합니다:
 
+##### D3D11_USAGE_IMMUTABLE
+```cpp
+// GPU 전용 메모리 (VRAM)에 할당, 생성 후 변경 불가
+Location: GPU Local Memory (VRAM)
+Access: GPU 읽기 전용, CPU 접근 불가
+Bandwidth: 최고 (500+ GB/s)
+Latency: 최저
+Update: 생성 시에만 데이터 설정 가능
+
+메모리 레이아웃:
+┌─────────────────────┐
+│    시스템 RAM       │  ← 초기 데이터만 여기서 전송
+├─────────────────────┤
+│    PCIe Bus         │  ← 생성 시 한 번만 데이터 전송
+├─────────────────────┤
+│    GPU VRAM         │  ← 버퍼가 여기에 영구 생성 ★
+│  ┌───────────────┐  │
+│  │Immutable Buffer│  │  (읽기 전용, 변경 불가)
+│  └───────────────┘  │
+└─────────────────────┘
+
+특징:
+- 생성 시 반드시 initData 제공 필요
+- 생성 후 UpdateSubresource, Map 등으로 수정 불가
+- 가장 빠른 GPU 접근 성능
+- 정적 데이터(모델 메시, 텍스처 등)에 최적
+```
+
 ##### D3D11_USAGE_DEFAULT
 ```cpp
 // GPU 전용 메모리 (VRAM)에 할당
