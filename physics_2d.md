@@ -300,7 +300,7 @@ Vector2 normalGravity = {0, -980.0f};
 // 2. 달 중력 (지구의 1/6)
 Vector2 moonGravity = {0, -163.0f};
 
-// 3. 역중력 (위로 떨어짐)
+// 3. 역중력 (위로 올라감)
 Vector2 reverseGravity = {0, 980.0f};
 
 // 4. 측면 중력 (벽에 붙는 효과)
