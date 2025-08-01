@@ -41,7 +41,7 @@ Vector2 position = {100.0f, 200.0f};  // 화면상 (100, 200) 위치
 **속도**는 위치의 변화율입니다. 즉, 시간당 얼마나 이동하는가를 나타냅니다.
 
 ```cpp
-Vector2 velocity = {50.0f, -30.0f};  // 초당 오른쪽으로 50, 위로 30 이동
+Vector2 velocity = {50.0f, 30.0f};  // 초당 오른쪽으로 50, 위로 30 이동
 ```
 
 **속도의 의미**:
@@ -65,7 +65,7 @@ void UpdatePosition(float deltaTime) {
 **가속도**는 속도의 변화율입니다. 힘이 가해지면 가속도가 생깁니다.
 
 ```cpp
-Vector2 acceleration = {0.0f, 980.0f};  // 중력 가속도 (아래 방향)
+Vector2 acceleration = {0.0f, -980.0f};  // 중력 가속도 (아래 방향)
 ```
 
 #### 가속도로 속도 업데이트
@@ -128,7 +128,7 @@ void ApplyForce(Vector2 force, float deltaTime) {
 **게임에서의 활용**:
 ```cpp
 // 중력 적용
-Vector2 gravity = {0, 980.0f};  // 9.8m/s² × 100 (픽셀 단위)
+Vector2 gravity = {0, -980.0f};  // 9.8m/s² × 100 (픽셀 단위, 아래 방향)
 ApplyForce(gravity * mass, deltaTime);
 
 // 엔진 추진력
@@ -208,7 +208,7 @@ class FallingObject {
 private:
     Vector2 position;
     Vector2 velocity;
-    const float gravity = 980.0f;  // 9.8m/s² × 100
+    const float gravity = -980.0f;  // 9.8m/s² × 100 (아래 방향)
 
 public:
     void Update(float deltaTime) {
@@ -219,7 +219,7 @@ public:
         position += velocity * deltaTime;
         
         // 땅에 닿으면 정지
-        if (position.y >= groundLevel) {
+        if (position.y <= groundLevel) {
             position.y = groundLevel;
             velocity.y = 0;
         }
@@ -237,7 +237,7 @@ private:
     Vector2 position;
     Vector2 velocity;
     Vector2 initialVelocity;
-    const Vector2 gravity = {0, 980.0f};
+    const Vector2 gravity = {0, -980.0f};  // 아래 방향
     float elapsedTime;
 
 public:
@@ -280,7 +280,7 @@ public:
 ```cpp
 class GravitySystem {
 private:
-    const Vector2 earthGravity = {0, 980.0f};  // 9.8m/s²
+    const Vector2 earthGravity = {0, -980.0f};  // 9.8m/s² (아래 방향)
 
 public:
     void ApplyGravity(GameObject& obj, float deltaTime) {
@@ -293,13 +293,13 @@ public:
 **다양한 중력 구현**:
 ```cpp
 // 1. 일반 중력
-Vector2 normalGravity = {0, 980.0f};
+Vector2 normalGravity = {0, -980.0f};
 
 // 2. 달 중력 (지구의 1/6)
-Vector2 moonGravity = {0, 163.0f};
+Vector2 moonGravity = {0, -163.0f};
 
 // 3. 역중력 (위로 떨어짐)
-Vector2 reverseGravity = {0, -980.0f};
+Vector2 reverseGravity = {0, 980.0f};
 
 // 4. 측면 중력 (벽에 붙는 효과)
 Vector2 sideGravity = {-980.0f, 0};
@@ -318,7 +318,7 @@ private:
 
 public:
     Vector2 CalculateFriction(const GameObject& obj, Vector2 appliedForce) {
-        float normalForce = obj.mass * 980.0f;  // 수직항력
+        float normalForce = obj.mass * 980.0f;  // 수직항력 (중력 크기)
         
         if (Length(obj.velocity) < 0.1f) {
             // 정지 상태: 정지 마찰
@@ -660,7 +660,7 @@ public:
         if (submergedVolume > 0) {
             // 부력 = 물의 밀도 × 잠긴 부피 × 중력
             float buoyancyForce = waterDensity * submergedVolume * gravity;
-            return Vector2{0, -buoyancyForce};  // 위쪽으로
+            return Vector2{0, buoyancyForce};  // 위쪽으로
         }
         
         return {0, 0};
@@ -668,9 +668,9 @@ public:
     
 private:
     float CalculateSubmergedVolume(GameObject& obj, float waterLevel) {
-        if (obj.position.y + obj.radius < waterLevel) {
+        if (obj.position.y - obj.radius > waterLevel) {
             return 0;  // 완전히 물 위
-        } else if (obj.position.y - obj.radius > waterLevel) {
+        } else if (obj.position.y + obj.radius < waterLevel) {
             return obj.volume;  // 완전히 물 속
         } else {
             // 부분적으로 잠김 - 원의 일부 부피 계산
@@ -714,8 +714,8 @@ private:
     bool isGrounded = false;
     
     // 물리 상수들
-    const float gravity = 980.0f;
-    const float jumpForce = -400.0f;
+    const float gravity = -980.0f;  // 아래 방향
+    const float jumpForce = 400.0f;  // 위쪽으로 점프
     const float moveSpeed = 200.0f;
     const float groundFriction = 0.8f;
     const float airFriction = 0.95f;
@@ -757,7 +757,7 @@ private:
     
     void CheckCollisions() {
         // 땅과의 충돌
-        if (position.y >= groundLevel) {
+        if (position.y <= groundLevel) {
             position.y = groundLevel;
             velocity.y = 0;
             isGrounded = true;
@@ -838,11 +838,11 @@ private:
         }
         
         // 상하 벽
-        if (position.y - radius <= 0) {
-            position.y = radius;
-            velocity.y = -velocity.y * restitution;
-        } else if (position.y + radius >= tableHeight) {
+        if (position.y + radius >= tableHeight) {
             position.y = tableHeight - radius;
+            velocity.y = -velocity.y * restitution;
+        } else if (position.y - radius <= 0) {
+            position.y = radius;
             velocity.y = -velocity.y * restitution;
         }
     }
@@ -864,7 +864,7 @@ public:
             oldPosition = position;
             
             // 중력 적용
-            position += velocity + Vector2{0, 980.0f} * deltaTime * deltaTime;
+            position += velocity + Vector2{0, -980.0f} * deltaTime * deltaTime;
         }
     }
 };
