@@ -247,6 +247,79 @@ deviceContext->OMSetRenderTargets(
 );
 ```
 
+**렌더 타겟 뷰 사용 과정:**
+
+##### 1. 기본 렌더링 과정
+```cpp
+void RenderToBackBuffer() {
+    // 1. 백 버퍼를 렌더 타겟으로 설정
+    deviceContext->OMSetRenderTargets(1, &backBufferRTV, depthStencilView);
+    
+    // 2. 렌더 타겟 클리어 (캔버스 청소)
+    float clearColor[4] = {0.0f, 0.2f, 0.4f, 1.0f};  // 진한 파란색
+    deviceContext->ClearRenderTargetView(backBufferRTV, clearColor);
+    
+    // 3. 3D 객체들 그리기
+    RenderObjects();
+    
+    // 4. 화면에 출력
+    swapChain->Present(1, 0);
+}
+```
+
+##### 2. 오프스크린 렌더링 과정 (예: 그림자 맵 생성)
+```cpp
+void RenderShadowMap() {
+    // 1. 그림자 맵 텍스처를 렌더 타겟으로 설정
+    deviceContext->OMSetRenderTargets(1, &shadowMapRTV, shadowMapDepthView);
+    
+    // 2. 그림자 맵 클리어
+    float clearColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};  // 흰색 (멀리 있음)
+    deviceContext->ClearRenderTargetView(shadowMapRTV, clearColor);
+    
+    // 3. 조명 시점에서 깊이 정보만 렌더링
+    RenderDepthOnly();
+    
+    // 4. 그림자 맵을 다른 렌더링에서 텍스처로 사용
+    deviceContext->PSSetShaderResources(1, 1, &shadowMapSRV);
+}
+```
+
+##### 3. 멀티 렌더 타겟 (MRT) 사용
+```cpp
+// 지연 렌더링(Deferred Rendering)에서 사용
+ID3D11RenderTargetView* multipleRTVs[4] = {
+    diffuseRTV,    // 확산 색상
+    normalRTV,     // 법선 벡터
+    specularRTV,   // 반사 색상
+    positionRTV    // 월드 위치
+};
+
+// 4개의 렌더 타겟에 동시에 렌더링
+deviceContext->OMSetRenderTargets(4, multipleRTVs, depthStencilView);
+
+// 픽셀 셰이더에서 각 타겟에 다른 값 출력
+```
+
+**멀티 렌더 타겟용 픽셀 셰이더 예시:**
+```hlsl
+struct PSOutput {
+    float4 diffuse  : SV_Target0;  // 첫 번째 렌더 타겟
+    float4 normal   : SV_Target1;  // 두 번째 렌더 타겟
+    float4 specular : SV_Target2;  // 세 번째 렌더 타겟
+    float4 position : SV_Target3;  // 네 번째 렌더 타겟
+};
+
+PSOutput main(VertexOutput input) {
+    PSOutput output;
+    output.diffuse = CalculateDiffuse(input);
+    output.normal = CalculateNormal(input);
+    output.specular = CalculateSpecular(input);
+    output.position = input.worldPos;
+    return output;
+}
+```
+
 #### 블렌드 상태 설정
 ```cpp
 float blendFactor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -372,6 +445,44 @@ deviceContext->DrawIndexedInstanced(
 **최고의 성능:**
 - 정점 재사용 + 인스턴스 렌더링의 조합
 - 대량의 동일 객체 렌더링에 최적
+
+## 렌더 타겟 전환 시 주의사항
+
+### 상태 관리
+```cpp
+// 렌더 타겟 전환 시 항상 클리어
+void SwitchRenderTarget(ID3D11RenderTargetView* newRTV, ID3D11DepthStencilView* newDSV) {
+    // 1. 새 렌더 타겟 설정
+    deviceContext->OMSetRenderTargets(1, &newRTV, newDSV);
+    
+    // 2. 반드시 클리어 (이전 내용 제거)
+    float clearColor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    deviceContext->ClearRenderTargetView(newRTV, clearColor);
+    if (newDSV) {
+        deviceContext->ClearDepthStencilView(newDSV, 
+            D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+    }
+    
+    // 3. 뷰포트도 적절히 설정
+    SetViewportForRenderTarget(newRTV);
+}
+```
+
+### 성능 최적화
+```cpp
+// 렌더 타겟 전환 최소화
+void OptimizedMultiPassRendering() {
+    // 1. 모든 그림자 맵을 한 번에 생성
+    RenderAllShadowMaps();
+    
+    // 2. 모든 후처리를 연속으로 처리
+    RenderSceneToTexture();
+    ApplyAllPostProcessEffects();
+    
+    // 3. 최종 조합을 백 버퍼에서 수행
+    CombineToBackBuffer();
+}
+```
 
 ## 리소스 업데이트 함수들
 
@@ -803,6 +914,195 @@ float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 deviceContext->ClearRenderTargetView(renderTargetView, clearColor);
 deviceContext->Draw(vertexCount, 0);
 ```
+
+## Present 호출 후 렌더 타겟 뷰의 동작
+
+많은 초보자들이 궁금해하는 중요한 질문: "SwapChain Present를 호출해서 백 버퍼가 교체된 후에 Device Context에서 렌더 타겟 뷰를 다시 설정해야 하나요?"
+
+**답: 아니요! 렌더 타겟 뷰를 다시 설정할 필요가 없습니다.**
+
+### 왜 그럴까요?
+
+SwapChain의 Present 동작 과정을 이해하면 답을 알 수 있습니다:
+
+```cpp
+// 더블 버퍼링 시스템의 내부 동작
+┌─────────────────────┐    ┌─────────────────────┐
+│   프론트 버퍼       │    │    백 버퍼          │
+│  (현재 화면에 표시) │    │ (다음 프레임 준비)  │
+└─────────────────────┘    └─────────────────────┘
+        ↑                          ↑
+    사용자가 봄              Device Context가 렌더링하는 곳
+
+// Present() 호출 시:
+1. 포인터만 교체됨 (실제 메모리는 이동하지 않음)
+┌─────────────────────┐    ┌─────────────────────┐
+│    백 버퍼          │    │   프론트 버퍼       │
+│ (다음 프레임 준비)  │    │ (현재 화면에 표시)  │
+└─────────────────────┘    └─────────────────────┘
+
+2. 렌더 타겟 뷰는 여전히 새로운 "백 버퍼"를 가리킴
+```
+
+### Device Context의 스마트한 렌더 타겟 관리
+
+```cpp
+// Device Context 렌더링 루프 예시
+void RenderLoop() {
+    while (running) {
+        // 1. 렌더 타겟 설정 (한 번만 설정하면 됨)
+        deviceContext->OMSetRenderTargets(1, &frameBufferRTV, depthStencilView);
+        
+        // 2. 백 버퍼 클리어
+        float clearColor[4] = {0.0f, 0.2f, 0.4f, 1.0f};
+        deviceContext->ClearRenderTargetView(frameBufferRTV, clearColor);
+        deviceContext->ClearDepthStencilView(depthStencilView, 
+            D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+        
+        // 3. 모든 렌더링 작업
+        RenderAllObjects();
+        
+        // 4. Present 호출 (백 버퍼와 프론트 버퍼 교체)
+        swapChain->Present(1, 0);
+        
+        // ★ Device Context에서 렌더 타겟 뷰 재설정 불필요!
+        // frameBufferRTV는 자동으로 새로운 백 버퍼를 가리킴
+    }
+}
+```
+
+### Present 내부 동작 과정
+
+```cpp
+// Present() 내부 동작 (의사코드)
+void IDXGISwapChain::Present(UINT syncInterval, UINT flags) {
+    // 1. 백 버퍼와 프론트 버퍼의 역할 교체
+    SwapBufferPointers();
+    
+    // 2. 모든 렌더 타겟 뷰가 자동으로 새로운 백 버퍼를 참조하도록 업데이트
+    UpdateAllRenderTargetViews();
+    
+    // 3. 화면에 새로운 프론트 버퍼 내용 출력
+    DisplayToScreen();
+}
+```
+
+### 렌더 타겟 뷰가 변경되지 않는 이유
+
+**1. DXGI의 스마트한 참조 관리**
+```cpp
+// 렌더 타겟 뷰는 "현재 백 버퍼"에 대한 논리적 참조를 유지
+// 물리적 메모리 주소가 아닌, "백 버퍼 역할"을 하는 버퍼를 추적
+
+ID3D11RenderTargetView* frameBufferRTV;  // 항상 "현재 백 버퍼"를 가리킴
+device->CreateRenderTargetView(backBuffer, nullptr, &frameBufferRTV);
+
+// Present 후에도 frameBufferRTV는 여전히 유효하고 올바른 백 버퍼를 가리킴
+// Device Context는 동일한 RTV 포인터로 올바른 백 버퍼에 렌더링 가능
+```
+
+**2. SwapChain의 버퍼 관리**
+```cpp
+// SwapChain은 여러 버퍼를 순환하면서 관리
+// 더블 버퍼링: 2개 버퍼
+// 트리플 버퍼링: 3개 버퍼
+
+// 각 Present 호출마다:
+// 1. 현재 백 버퍼 → 프론트 버퍼로 승격
+// 2. 이전 프론트 버퍼 → 새로운 백 버퍼로 강등
+// 3. 모든 백 버퍼 참조자들이 자동으로 새로운 백 버퍼를 가리키도록 업데이트
+```
+
+### Device Context가 주의해야 할 상황들
+
+**윈도우 크기 변경 시에만 재설정 필요:**
+```cpp
+// 이때만 Device Context에서 렌더 타겟 뷰를 다시 설정해야 함
+void OnWindowResize(int newWidth, int newHeight) {
+    // 1. Device Context에서 렌더 타겟 해제 (필수!)
+    deviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+    
+    // 2. 기존 뷰 해제
+    frameBufferRTV->Release();
+    depthStencilView->Release();
+    
+    // 3. SwapChain 버퍼 크기 조정
+    swapChain->ResizeBuffers(0, newWidth, newHeight, DXGI_FORMAT_UNKNOWN, 0);
+    
+    // 4. 새로운 크기로 뷰 재생성
+    CreateFrameBufferViews();
+    
+    // 5. Device Context에 새 렌더 타겟 설정
+    deviceContext->OMSetRenderTargets(1, &frameBufferRTV, depthStencilView);
+}
+```
+
+**풀스크린 모드 전환 시:**
+```cpp
+// 풀스크린 ↔ 윈도우 모드 전환 시에도 재설정 필요
+void ToggleFullscreen() {
+    // 1. Device Context에서 렌더 타겟 해제
+    deviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+    
+    // 2. 뷰 해제
+    ReleaseFrameBufferViews();
+    
+    // 3. 풀스크린 전환
+    swapChain->SetFullscreenState(!isFullscreen, nullptr);
+    
+    // 4. 뷰 재생성 및 Device Context에 재설정
+    CreateFrameBufferViews();
+    deviceContext->OMSetRenderTargets(1, &frameBufferRTV, depthStencilView);
+}
+```
+
+### Device Context 성능상의 이점
+
+```cpp
+// 매 프레임마다 렌더 타겟 뷰를 재설정하지 않아도 되므로:
+// - Device Context 상태 변경 최소화
+// - OMSetRenderTargets 호출 횟수 감소
+// - CPU 오버헤드 감소
+// - 더 안정적인 렌더링 루프
+
+// 잘못된 방법 (불필요한 Device Context 오버헤드)
+void BadRenderLoop() {
+    while (running) {
+        swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));          // 매 프레임 호출 ❌
+        device->CreateRenderTargetView(backBuffer, nullptr, &rtv);   // 매 프레임 생성 ❌
+        deviceContext->OMSetRenderTargets(1, &rtv, nullptr);        // 매 프레임 설정 ❌
+        
+        RenderFrame();
+        
+        rtv->Release();                                              // 매 프레임 해제 ❌
+        backBuffer->Release();
+        swapChain->Present(1, 0);
+    }
+}
+
+// 올바른 방법 (효율적인 Device Context 사용)
+void GoodRenderLoop() {
+    // 초기화 시 한 번만 생성
+    CreateFrameBufferViews();                                        // 한 번만 생성 ✅
+    deviceContext->OMSetRenderTargets(1, &frameBufferRTV, dsv);     // 한 번만 설정 ✅
+    
+    while (running) {
+        // Device Context는 동일한 렌더 타겟으로 계속 렌더링
+        deviceContext->ClearRenderTargetView(frameBufferRTV, clearColor);
+        RenderFrame();
+        swapChain->Present(1, 0);                                    // Present만 호출 ✅
+    }
+    
+    // 종료 시 한 번만 해제
+    ReleaseFrameBufferViews();                                       // 한 번만 해제 ✅
+}
+```
+
+**핵심 요약:**
+- **Present 후 Device Context에서 렌더 타겟 뷰 재설정 불필요** ✅
+- **SwapChain이 자동으로 백 버퍼 참조를 관리** ✅
+- **윈도우 크기 변경이나 풀스크린 전환 시에만 재설정** ✅
+- **매 프레임 재설정은 Device Context 성능 낭비** ❌
 
 ## 요약
 

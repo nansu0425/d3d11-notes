@@ -140,10 +140,50 @@ device->CreateShaderResourceView(texture, nullptr, &textureView);
 - 나무 질감, 금속 표면, 피부 등 복잡한 디테일 표현
 - 메모리 효율적인 압축 포맷 지원
 
-#### 렌더 타겟 텍스처
-화면이 아닌 메모리상의 텍스처에 렌더링할 때 사용합니다.
+#### 렌더 타겟과 렌더 타겟 뷰란 무엇인가?
 
+**렌더 타겟(Render Target)**은 GPU가 그림을 그릴 수 있는 "캔버스"입니다. 화가가 그림을 그리기 위해 캔버스가 필요하듯이, GPU도 렌더링 결과를 저장할 메모리 공간이 필요합니다.
+
+**렌더 타겟 뷰(Render Target View)**는 이 캔버스에 접근하기 위한 "브러시"나 "펜"의 역할을 합니다. 실제 텍스처(메모리)와 GPU 사이의 인터페이스 역할을 합니다.
+
+```
+실제 비유:
+┌─────────────────┐
+│   화가 (GPU)    │
+└─────────┬───────┘
+          │ 그림 그리기
+          ▼
+┌─────────────────┐   ← 렌더 타겟 뷰 (브러시/펜)
+│      브러시      │     (GPU가 접근하는 방법)
+└─────────┬───────┘
+          │
+          ▼
+┌─────────────────┐   ← 렌더 타겟 (캔버스)
+│   캔버스        │     (실제 메모리/텍스처)
+│  (텍스처 메모리) │
+└─────────────────┘
+```
+
+#### 렌더 타겟의 종류
+
+DirectX 11에서는 두 가지 주요 렌더 타겟이 있습니다:
+
+##### 1. 백 버퍼 렌더 타겟 (최종 화면 출력용)
+SwapChain의 백 버퍼를 사용하여 화면에 직접 렌더링합니다.
+
+**특징:**
+- 사용자가 실제로 보는 화면에 직접 그리기
+- SwapChain과 연결되어 더블 버퍼링 지원
+- 윈도우 크기에 따라 자동으로 크기 결정
+
+**사용 시나리오:**
+- 메인 게임 화면 렌더링
+- UI 요소 최종 출력
+- 모든 후처리가 완료된 최종 이미지
+
+##### 2. 오프스크린 렌더 타겟 (메모리상의 텍스처)
 ```cpp
+// 메모리상의 텍스처를 렌더 타겟으로 사용
 D3D11_TEXTURE2D_DESC renderTargetDesc = {};
 renderTargetDesc.Width = 1024;
 renderTargetDesc.Height = 1024;
@@ -159,6 +199,206 @@ device->CreateTexture2D(&renderTargetDesc, nullptr, &renderTargetTexture);
 
 ID3D11RenderTargetView* renderTargetView;
 device->CreateRenderTargetView(renderTargetTexture, nullptr, &renderTargetView);
+
+// 화면이 아닌 텍스처에 그리기
+deviceContext->OMSetRenderTargets(1, &renderTargetView, nullptr);
+```
+
+#### 렌더 타겟 뷰가 필요한 이유
+
+GPU는 텍스처에 직접 접근할 수 없고, 반드시 "뷰(View)"를 통해서만 접근할 수 있습니다. 이는 다음과 같은 이유 때문입니다:
+
+##### 1. 안전성과 검증
+```cpp
+// 뷰 생성 시 GPU가 확인하는 것들:
+// - 텍스처 포맷이 렌더링에 적합한가?
+// - 메모리 크기가 충분한가?
+// - 멀티샘플링 설정이 올바른가?
+
+D3D11_RENDER_TARGET_VIEW_DESC rtvDesc = {};
+rtvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;        // 색상 포맷 지정
+rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D; // 2D 텍스처로 사용
+rtvDesc.Texture2D.MipSlice = 0;                      // 밉맵 레벨 지정
+
+device->CreateRenderTargetView(texture, &rtvDesc, &renderTargetView);
+```
+
+##### 2. 유연한 접근 방식
+```cpp
+// 하나의 텍스처를 여러 방식으로 사용 가능
+ID3D11Texture2D* texture;           // 실제 메모리
+ID3D11RenderTargetView* rtv;        // 렌더링용 뷰
+ID3D11ShaderResourceView* srv;      // 셰이더에서 읽기용 뷰
+ID3D11UnorderedAccessView* uav;     // 컴퓨트 셰이더용 뷰
+
+// 같은 텍스처를 다양한 용도로 사용
+device->CreateRenderTargetView(texture, nullptr, &rtv);    // 그리기용
+device->CreateShaderResourceView(texture, nullptr, &srv);   // 읽기용
+```
+
+##### 3. 서브리소스 접근
+```cpp
+// 큐브맵 텍스처의 각 면을 개별 렌더 타겟으로 사용
+for (int face = 0; face < 6; face++) {
+    D3D11_RENDER_TARGET_VIEW_DESC rtvDesc = {};
+    rtvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+    rtvDesc.Texture2DArray.ArraySlice = face;  // 각 면을 개별 타겟으로
+    rtvDesc.Texture2DArray.MipSlice = 0;
+    
+    device->CreateRenderTargetView(cubeMapTexture, &rtvDesc, &cubeMapRTVs[face]);
+}
+```
+
+#### 렌더 타겟 사용 과정
+
+##### Device의 역할: 렌더 타겟 뷰 생성
+```cpp
+// Device가 렌더 타겟 뷰를 생성하는 과정
+ID3D11Texture2D* renderTargetTexture;
+device->CreateTexture2D(&renderTargetDesc, nullptr, &renderTargetTexture);
+
+ID3D11RenderTargetView* renderTargetView;
+device->CreateRenderTargetView(renderTargetTexture, nullptr, &renderTargetView);
+```
+
+**Device의 책임:**
+- 렌더 타겟으로 사용할 텍스처 생성
+- 텍스처에 대한 렌더 타겟 뷰 생성
+- 뷰 생성 시 포맷 및 설정 검증
+
+**Device Context의 책임:**
+- 생성된 렌더 타겟 뷰를 파이프라인에 바인딩
+- 실제 렌더링 명령 실행
+- 렌더 타겟 클리어 및 상태 관리
+
+*(자세한 Device Context 사용법은 device_context.md 참조)*
+
+#### 멀티 렌더 타겟 (Multiple Render Targets, MRT)
+
+Device에서 여러 렌더 타겟 뷰를 생성할 수 있습니다:
+
+```cpp
+// 지연 렌더링용 여러 렌더 타겟 텍스처 생성
+ID3D11Texture2D* diffuseTexture;
+ID3D11Texture2D* normalTexture;
+ID3D11Texture2D* specularTexture;
+ID3D11Texture2D* positionTexture;
+
+device->CreateTexture2D(&textureDesc, nullptr, &diffuseTexture);
+device->CreateTexture2D(&textureDesc, nullptr, &normalTexture);
+device->CreateTexture2D(&textureDesc, nullptr, &specularTexture);
+device->CreateTexture2D(&textureDesc, nullptr, &positionTexture);
+
+// 각 텍스처에 대한 렌더 타겟 뷰 생성
+ID3D11RenderTargetView* diffuseRTV;
+ID3D11RenderTargetView* normalRTV;
+ID3D11RenderTargetView* specularRTV;
+ID3D11RenderTargetView* positionRTV;
+
+device->CreateRenderTargetView(diffuseTexture, nullptr, &diffuseRTV);
+device->CreateRenderTargetView(normalTexture, nullptr, &normalRTV);
+device->CreateRenderTargetView(specularTexture, nullptr, &specularRTV);
+device->CreateRenderTargetView(positionTexture, nullptr, &positionRTV);
+```
+
+**MRT의 장점:**
+- 한 번의 렌더링으로 여러 데이터 생성
+- 지연 렌더링(Deferred Rendering) 구현 가능
+- 복잡한 후처리 효과의 기반
+
+#### 렌더 타겟의 실제 사용 사례
+
+Device가 렌더 타겟을 생성하는 다양한 목적들:
+
+##### 1. 그림자 맵핑용 렌더 타겟
+```cpp
+// 그림자 맵용 깊이 텍스처 생성
+D3D11_TEXTURE2D_DESC shadowMapDesc = {};
+shadowMapDesc.Width = 2048;
+shadowMapDesc.Height = 2048;
+shadowMapDesc.Format = DXGI_FORMAT_R32_TYPELESS;  // 깊이 저장용
+shadowMapDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+
+ID3D11Texture2D* shadowMapTexture;
+device->CreateTexture2D(&shadowMapDesc, nullptr, &shadowMapTexture);
+
+// 깊이-스텐실 뷰와 셰이더 리소스 뷰 동시 생성
+ID3D11DepthStencilView* shadowMapDSV;
+ID3D11ShaderResourceView* shadowMapSRV;
+device->CreateDepthStencilView(shadowMapTexture, nullptr, &shadowMapDSV);
+device->CreateShaderResourceView(shadowMapTexture, nullptr, &shadowMapSRV);
+```
+
+##### 2. 후처리용 렌더 타겟
+```cpp
+// 후처리 체인용 텍스처들
+ID3D11Texture2D* sceneTexture;     // 원본 장면
+ID3D11Texture2D* blurTexture;      // 블러 효과
+ID3D11Texture2D* glowTexture;      // 글로우 효과
+
+device->CreateTexture2D(&renderTargetDesc, nullptr, &sceneTexture);
+device->CreateTexture2D(&renderTargetDesc, nullptr, &blurTexture);
+device->CreateTexture2D(&renderTargetDesc, nullptr, &glowTexture);
+
+// 각각에 대한 렌더 타겟 뷰와 셰이더 리소스 뷰 생성
+device->CreateRenderTargetView(sceneTexture, nullptr, &sceneRTV);
+device->CreateShaderResourceView(sceneTexture, nullptr, &sceneSRV);
+// ... 다른 텍스처들도 동일하게
+```
+
+##### 3. 큐브맵용 렌더 타겟
+```cpp
+// 큐브맵 텍스처 생성 (6면)
+D3D11_TEXTURE2D_DESC cubeMapDesc = {};
+cubeMapDesc.Width = 512;
+cubeMapDesc.Height = 512;
+cubeMapDesc.ArraySize = 6;  // 6개 면
+cubeMapDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+cubeMapDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+ID3D11Texture2D* cubeMapTexture;
+device->CreateTexture2D(&cubeMapDesc, nullptr, &cubeMapTexture);
+
+// 각 면에 대한 개별 렌더 타겟 뷰 생성
+ID3D11RenderTargetView* cubeMapRTVs[6];
+for (int face = 0; face < 6; face++) {
+    D3D11_RENDER_TARGET_VIEW_DESC rtvDesc = {};
+    rtvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+    rtvDesc.Texture2DArray.ArraySlice = face;
+    rtvDesc.Texture2DArray.MipSlice = 0;
+    
+    device->CreateRenderTargetView(cubeMapTexture, &rtvDesc, &cubeMapRTVs[face]);
+}
+```
+
+#### 렌더 타겟 포맷과 성능
+
+##### 일반적인 렌더 타겟 포맷들
+```cpp
+// 일반 색상 렌더링
+DXGI_FORMAT_R8G8B8A8_UNORM          // 32비트, 가장 일반적
+DXGI_FORMAT_R8G8B8A8_UNORM_SRGB     // sRGB 색공간
+
+// HDR 렌더링
+DXGI_FORMAT_R16G16B16A16_FLOAT      // 64비트, 높은 정밀도
+DXGI_FORMAT_R11G11B10_FLOAT         // 32비트, HDR 압축 포맷
+
+// 특수 목적
+DXGI_FORMAT_R32_FLOAT               // 32비트 부동소수점 (깊이 맵 등)
+DXGI_FORMAT_R8_UNORM                // 8비트 단색 (그림자 맵 등)
+```
+
+##### 성능 고려사항
+```cpp
+// 메모리 사용량 계산
+int textureMemory = width * height * bytesPerPixel;
+
+// 예시: 1920x1080 해상도
+// RGBA8: 1920 * 1080 * 4 = 8.3MB
+// RGBA16F: 1920 * 1080 * 8 = 16.6MB
+// HDR 렌더링 시 메모리 사용량 2배 증가
 ```
 
 **사용 목적:**
@@ -166,9 +406,12 @@ device->CreateRenderTargetView(renderTargetTexture, nullptr, &renderTargetView);
 - 후처리 효과 (블러, 글로우 등)
 - 미니맵 렌더링
 - 큐브맵 생성
+- 지연 렌더링 (Deferred Rendering)
+- 반사/굴절 효과
 
-#### 프레임 버퍼 렌더 타겟 뷰
-SwapChain의 백 버퍼를 사용하여 화면에 직접 렌더링할 때 사용합니다.
+#### 백 버퍼 렌더 타겟 뷰 생성 과정
+
+SwapChain의 백 버퍼로부터 렌더 타겟 뷰를 생성하는 Device의 역할:
 
 ```cpp
 // 1. SwapChain으로부터 백 버퍼 텍스처 얻기
@@ -179,7 +422,7 @@ if (FAILED(hr)) {
     return false;
 }
 
-// 2. 백 버퍼로부터 렌더 타겟 뷰 생성
+// 2. Device가 백 버퍼로부터 렌더 타겟 뷰 생성
 ID3D11RenderTargetView* frameBufferRTV = nullptr;
 hr = device->CreateRenderTargetView(backBuffer, nullptr, &frameBufferRTV);
 backBuffer->Release(); // 텍스처 참조 해제 (RTV가 참조를 가지고 있음)
@@ -189,7 +432,7 @@ if (FAILED(hr)) {
     return false;
 }
 
-// 3. 깊이-스텐실 버퍼도 함께 생성 (일반적으로 필요)
+// 3. Device가 깊이-스텐실 버퍼도 함께 생성
 D3D11_TEXTURE2D_DESC depthStencilDesc = {};
 depthStencilDesc.Width = windowWidth;
 depthStencilDesc.Height = windowHeight;
@@ -207,20 +450,18 @@ device->CreateTexture2D(&depthStencilDesc, nullptr, &depthStencilTexture);
 ID3D11DepthStencilView* depthStencilView = nullptr;
 device->CreateDepthStencilView(depthStencilTexture, nullptr, &depthStencilView);
 depthStencilTexture->Release();
-
-// 4. 렌더 타겟과 깊이-스텐실 뷰를 파이프라인에 바인딩
-deviceContext->OMSetRenderTargets(1, &frameBufferRTV, depthStencilView);
 ```
 
-**프레임 버퍼 RTV의 특징:**
-- **직접 화면 출력**: SwapChain과 연결되어 사용자가 실제로 보는 화면
-- **더블 버퍼링**: 백 버퍼에 그리고 Present()로 프론트 버퍼와 교체
-- **윈도우 크기 종속**: 윈도우 크기가 변경되면 재생성 필요
+**Device의 책임:**
+- SwapChain에서 백 버퍼 텍스처 획득
+- 백 버퍼에 대한 렌더 타겟 뷰 생성
+- 깊이-스텐실 텍스처 및 뷰 생성
+- 뷰 생성 시 포맷 및 설정 검증
 
-**윈도우 크기 변경 시 처리:**
+**윈도우 크기 변경 시 Device의 역할:**
 ```cpp
 void OnWindowResize(int newWidth, int newHeight) {
-    // 기존 뷰들 해제
+    // 1. 기존 뷰들 해제 (중요: SwapChain 크기 변경 전에 해제 필요)
     if (frameBufferRTV) {
         frameBufferRTV->Release();
         frameBufferRTV = nullptr;
@@ -230,19 +471,34 @@ void OnWindowResize(int newWidth, int newHeight) {
         depthStencilView = nullptr;
     }
     
-    // SwapChain 백 버퍼 크기 조정
-    swapChain->ResizeBuffers(0, newWidth, newHeight, DXGI_FORMAT_UNKNOWN, 0);
+    // 2. SwapChain 백 버퍼 크기 조정
+    HRESULT hr = swapChain->ResizeBuffers(
+        0,                      // 버퍼 개수 (0 = 기존과 동일)
+        newWidth,               // 새로운 너비
+        newHeight,              // 새로운 높이
+        DXGI_FORMAT_UNKNOWN,    // 포맷 (UNKNOWN = 기존과 동일)
+        0                       // 플래그
+    );
     
-    // 새로운 크기로 렌더 타겟 뷰 재생성
-    CreateFrameBufferRTV();
+    // 3. Device가 새로운 크기로 렌더 타겟 뷰 재생성
+    CreateFrameBufferRTV(newWidth, newHeight);
     CreateDepthStencilView(newWidth, newHeight);
 }
 ```
 
-**사용 시나리오:**
-- **메인 렌더링**: 게임의 최종 화면 출력
-- **UI 렌더링**: 사용자 인터페이스 요소들
-- **최종 후처리**: 모든 효과가 적용된 최종 이미지
+**백 버퍼 포맷 설정 (SwapChain 생성 시):**
+```cpp
+// SwapChain 생성 시 Device가 지원하는 백 버퍼 포맷 지정
+DXGI_SWAP_CHAIN_DESC swapChainDesc = {};
+// 일반적인 포맷들:
+swapChainDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;      // 표준 SDR
+// swapChainDesc.BufferDesc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;  // HDR10
+// swapChainDesc.BufferDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;  // HDR 부동소수점
+
+// 백 버퍼 개수 (더블/트리플 버퍼링)
+swapChainDesc.BufferCount = 2;  // 더블 버퍼링 (일반적)
+// swapChainDesc.BufferCount = 3;  // 트리플 버퍼링 (더 부드러움, 더 많은 메모리)
+```
 
 ### 3. 셰이더(Shader) 리소스
 
