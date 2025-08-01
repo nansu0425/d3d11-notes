@@ -390,6 +390,224 @@ DXGI_FORMAT_R32_FLOAT               // 32비트 부동소수점 (깊이 맵 등)
 DXGI_FORMAT_R8_UNORM                // 8비트 단색 (그림자 맵 등)
 ```
 
+##### 플립 모델 스왑 체인에서의 최적화된 포맷 조합
+
+**플립 모델 스왑 체인(Flip-model Swap Chain)**은 Windows 10 이후에서 권장되는 최신 디스플레이 기술입니다. 기존의 비트 블릿(BitBlt) 모델보다 성능과 효율성에서 큰 장점을 제공합니다.
+
+#### 왜 _UNORM 백 버퍼 + _SRGB 렌더 타겟 뷰 조합이 최적일까?
+
+##### 1. 플립 모델의 핵심 개념
+```cpp
+// 기존 비트 블릿 모델 (DXGI_SWAP_EFFECT_DISCARD)
+┌─────────────────┐    복사     ┌─────────────────┐
+│    백 버퍼       │ ────────→  │    프론트 버퍼    │
+│  (GPU VRAM)     │            │   (시스템 메모리) │
+└─────────────────┘            └─────────────────┘
+                                       │
+                                      복사
+                                       ▼
+                               ┌─────────────────┐
+                               │    화면 출력     │
+                               └─────────────────┘
+
+// 플립 모델 (DXGI_SWAP_EFFECT_FLIP_DISCARD)
+┌─────────────────┐    포인터   ┌─────────────────┐
+│   백 버퍼        │   교환만    │    프론트 버퍼    │
+│  (GPU VRAM)     │ ────────→  │  (GPU VRAM)     │
+└─────────────────┘            └─────────────────┘
+                                       │
+                                    직접 출력
+                                       ▼
+                               ┌─────────────────┐
+                               │    화면 출력     │
+                               └─────────────────┘
+```
+
+**플립 모델의 장점:**
+- **메모리 복사 제거**: 포인터만 교환하므로 데이터 복사 없음
+- **지연시간 감소**: 중간 복사 단계 제거로 입력 지연 최소화
+- **대역폭 절약**: GPU-CPU 간 데이터 전송 대폭 감소
+- **전력 효율성**: 불필요한 메모리 접근 제거
+
+##### 2. 최적화된 포맷 조합의 핵심
+
+```cpp
+// 권장 조합: UNORM 백 버퍼 + SRGB 렌더 타겟 뷰
+DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
+swapChainDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;  // ← 백 버퍼는 UNORM
+
+// 렌더 타겟 뷰는 SRGB로 생성
+D3D11_RENDER_TARGET_VIEW_DESC rtvDesc = {};
+rtvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;  // ← RTV는 SRGB
+device->CreateRenderTargetView(backBuffer, &rtvDesc, &renderTargetView);
+```
+
+#### 3. 성능 및 호환성 장점 분석
+
+##### Hardware Display Controller 최적화
+```cpp
+// 디스플레이 컨트롤러가 선호하는 포맷
+하드웨어 지원 포맷 (가장 빠름):
+- DXGI_FORMAT_R8G8B8A8_UNORM
+- DXGI_FORMAT_B8G8R8A8_UNORM  
+- DXGI_FORMAT_R10G10B10A2_UNORM // HDR
+
+소프트웨어 변환 필요 (느림):
+- DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ← 백 버퍼로 사용 시 변환 필요
+```
+
+**왜 백 버퍼를 UNORM으로 해야 할까?**
+
+1. **디스플레이 호환성**: 대부분의 디스플레이 컨트롤러는 UNORM 포맷을 직접 지원
+2. **스캔아웃 최적화**: GPU가 메모리에서 모니터로 직접 전송 시 변환 단계 없음
+3. **다중 모니터 지원**: 서로 다른 색공간의 모니터에 동일 버퍼 출력 가능
+
+##### sRGB 변환의 효율적 처리
+```cpp
+// GPU 하드웨어 레벨에서의 sRGB 처리
+픽셀 셰이더 출력 → 자동 sRGB 감마 보정 → UNORM 백 버퍼 저장
+                 ↑
+               하드웨어 변환 (무료)
+```
+
+**렌더 타겟 뷰를 SRGB로 하는 이유:**
+
+1. **자동 감마 보정**: 픽셀 셰이더 출력이 자동으로 sRGB로 변환됨
+2. **하드웨어 가속**: GPU가 하드웨어 레벨에서 변환 처리 (성능 비용 거의 없음)
+3. **색공간 정확성**: 선형 색공간에서 작업 후 올바른 감마 적용
+
+##### 4. 실제 구현 예시
+
+```cpp
+// 최적화된 플립 모델 스왑 체인 생성
+HRESULT CreateOptimizedSwapChain(HWND hwnd) {
+    // 1. DXGI Factory 생성
+    IDXGIFactory2* dxgiFactory = nullptr;
+    CreateDXGIFactory1(__uuidof(IDXGIFactory2), (void**)&dxgiFactory);
+    
+    // 2. 스왑 체인 설정 (UNORM 백 버퍼)
+    DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
+    swapChainDesc.Width = windowWidth;
+    swapChainDesc.Height = windowHeight;
+    swapChainDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;  // ← 핵심: UNORM 포맷
+    swapChainDesc.SampleDesc.Count = 1;
+    swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    swapChainDesc.BufferCount = 2;  // 더블 버퍼링
+    swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;  // ← 플립 모델
+    swapChainDesc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;  // 가변 주사율 지원
+    
+    // 3. 스왑 체인 생성
+    IDXGISwapChain1* swapChain1 = nullptr;
+    HRESULT hr = dxgiFactory->CreateSwapChainForHwnd(
+        device,
+        hwnd,
+        &swapChainDesc,
+        nullptr,  // 전체 화면 설정
+        nullptr,  // 출력 제한 없음
+        &swapChain1
+    );
+    
+    // 4. 백 버퍼에서 SRGB 렌더 타겟 뷰 생성
+    ID3D11Texture2D* backBuffer = nullptr;
+    swapChain1->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backBuffer);
+    
+    D3D11_RENDER_TARGET_VIEW_DESC rtvDesc = {};
+    rtvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;  // ← 핵심: SRGB 뷰
+    rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    
+    ID3D11RenderTargetView* renderTargetView = nullptr;
+    device->CreateRenderTargetView(backBuffer, &rtvDesc, &renderTargetView);
+    
+    backBuffer->Release();
+    return hr;
+}
+```
+
+##### 5. 성능 비교 분석
+
+```cpp
+// 비교 1: 기존 방식 (비효율적)
+백 버퍼: DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│ 픽셀 셰이더 출력  │  → │  sRGB 백 버퍼    │  → │   UNORM 변환 후  │→ 화면
+│ (선형 색공간)    │     │  (감마 적용됨)   │    │   디스플레이 출력 │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+                              ↑                        ↑
+                         하드웨어 변환            소프트웨어 변환
+                        (GPU에서 처리)           (느린 복사 작업)
+
+// 비교 2: 최적화된 방식 (권장)
+백 버퍼: DXGI_FORMAT_R8G8B8A8_UNORM, RTV: DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│ 픽셀 셰이더 출력  │ →  │   UNORM 백 버퍼  │ →  │   직접 디스플레이  │→ 화면
+│ (선형 색공간)     │    │  (SRGB 변환됨)   │    │   출력 (변환없음) │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+                              ↑                        ↑
+                         하드웨어 변환              하드웨어 직접 출력
+                        (GPU에서 처리)              (포인터 교환만)
+```
+
+**성능 향상 수치 (대략적):**
+- **프레임 지연**: 1-2프레임 감소
+- **GPU 사용률**: 5-10% 감소 (복사 작업 제거)
+- **전력 효율**: 10-15% 향상
+- **메모리 대역폭**: 30-50% 절약
+
+##### 6. 추가 최적화 기법
+
+```cpp
+// Variable Refresh Rate (VRR) 지원
+swapChainDesc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+
+// 저지연 모드
+swapChainDesc.Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+
+// HDR 지원 (Windows 10 1703+)
+if (supportsHDR) {
+    swapChainDesc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+    // HDR 메타데이터 설정...
+}
+```
+
+##### 7. 호환성 확인
+
+```cpp
+// 플립 모델 지원 확인
+HRESULT CheckFlipModelSupport() {
+    IDXGIFactory2* factory = nullptr;
+    HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory2), (void**)&factory);
+    
+    if (FAILED(hr)) {
+        // Windows 8 이하, 플립 모델 미지원
+        return E_FAIL;
+    }
+    
+    // Windows 8.1+ 지원됨
+    factory->Release();
+    return S_OK;
+}
+
+// 폴백 처리
+if (FAILED(CheckFlipModelSupport())) {
+    // 기존 BitBlt 모델로 폴백
+    swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    swapChainDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;  // 직접 SRGB 사용
+}
+```
+
+#### 핵심 정리
+
+**플립 모델 + UNORM 백 버퍼 + SRGB RTV 조합의 장점:**
+
+1. **최고 성능**: 메모리 복사 제거, 하드웨어 직접 출력
+2. **저지연**: 입력부터 화면 출력까지 최소 지연시간
+3. **호환성**: 모든 디스플레이 컨트롤러에서 최적 성능
+4. **색공간 정확성**: 올바른 sRGB 감마 보정
+5. **전력 효율**: 불필요한 메모리 액세스 제거
+6. **확장성**: HDR, VRR 등 최신 기능 지원 기반
+
+이 조합은 Windows 10 이후의 최신 그래픽 애플리케이션에서 표준으로 사용되며, 특히 게임과 실시간 렌더링 애플리케이션에서 큰 성능 향상을 제공합니다.
+
 ##### 성능 고려사항
 ```cpp
 // 메모리 사용량 계산
