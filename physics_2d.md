@@ -237,11 +237,13 @@ private:
     Vector2 position;
     Vector2 velocity;
     Vector2 initialVelocity;
+    Vector2 startPosition;        // 시작 위치 저장
     const Vector2 gravity = {0, -980.0f};  // 아래 방향
     float elapsedTime;
 
 public:
     void Launch(Vector2 startPos, float angle, float speed) {
+        startPosition = startPos;     // 시작 위치 저장
         position = startPos;
         elapsedTime = 0;
         
