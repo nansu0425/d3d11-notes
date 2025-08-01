@@ -311,9 +311,224 @@ BOOL TranslateMessage(const MSG* lpMsg);    // 키보드 메시지 변환
 LRESULT DispatchMessage(const MSG* lpMsg);  // 윈도우 프로시저로 메시지 전달
 ```
 
-**역할:**
-- `TranslateMessage`: 가상 키 코드를 문자 메시지로 변환
-- `DispatchMessage`: 메시지를 해당 윈도우의 프로시저 함수로 전달
+#### TranslateMessage의 상세 동작 원리
+
+`TranslateMessage`는 키보드 입력 처리에서 매우 중요한 역할을 합니다. 가상 키 코드(Virtual Key Code)를 실제 문자 메시지로 변환하는 과정을 자세히 알아봅시다.
+
+##### 1. 가상 키 코드 vs 문자 메시지
+```cpp
+// 사용자가 'A' 키를 눌렀을 때의 메시지 흐름
+
+// 1단계: 하드웨어에서 발생하는 원시 메시지
+WM_KEYDOWN: wParam = VK_A (가상 키 코드 0x41)
+
+// 2단계: TranslateMessage 호출 후 추가로 생성되는 메시지
+WM_CHAR: wParam = 'A' (실제 문자 코드 0x41)
+// 또는 Shift+A인 경우
+WM_CHAR: wParam = 'a' (소문자, 0x61)
+```
+
+##### 2. 메시지 변환 과정과 큐 처리
+```cpp
+// 메시지 루프에서의 실제 처리 순서
+while (GetMessage(&msg, NULL, 0, 0)) {
+    // 1. GetMessage로 WM_KEYDOWN 메시지 가져옴
+    
+    // 2. TranslateMessage 호출
+    TranslateMessage(&msg);  // ← 여기서 WM_CHAR 메시지가 큐에 추가됨!
+    
+    // 3. 현재 메시지(WM_KEYDOWN) 처리
+    DispatchMessage(&msg);
+    
+    // 4. 다음 GetMessage 호출 시 WM_CHAR 메시지가 반환됨
+}
+```
+
+**중요한 점:** `TranslateMessage`는 새로운 메시지를 **메시지 큐에 추가**합니다. 즉시 처리하지 않습니다!
+
+##### 3. 키보드 상태와 문자 변환
+```cpp
+// TranslateMessage가 고려하는 요소들
+// 1. 현재 키보드 레이아웃 (한글, 영문 등)
+// 2. Shift, Ctrl, Alt 키 상태
+// 3. Caps Lock 상태
+// 4. Num Lock 상태 (숫자 키패드)
+
+// 예시: 'A' 키를 눌렀을 때
+if (GetKeyState(VK_SHIFT) & 0x8000) {
+    // Shift가 눌려있으면 → WM_CHAR: wParam = 'A' (대문자)
+} else {
+    // Shift가 안 눌려있으면 → WM_CHAR: wParam = 'a' (소문자)
+}
+
+// 특수 키들의 경우
+VK_RETURN → WM_CHAR: wParam = 13 (캐리지 리턴)
+VK_BACK   → WM_CHAR: wParam = 8  (백스페이스)
+VK_TAB    → WM_CHAR: wParam = 9  (탭)
+```
+
+##### 4. 메시지 처리 순서 예시
+```cpp
+// 사용자가 'Hello'를 타이핑했을 때의 메시지 순서
+// (Shift + H, e, l, l, o)
+
+// 'H' 키 입력:
+WM_KEYDOWN: wParam = VK_H
+TranslateMessage() 호출 → WM_CHAR: wParam = 'H' 큐에 추가
+DispatchMessage() → WindowProc에서 WM_KEYDOWN 처리
+다음 GetMessage() → WM_CHAR: wParam = 'H' 받음
+DispatchMessage() → WindowProc에서 WM_CHAR 처리
+
+WM_KEYUP: wParam = VK_H
+// TranslateMessage는 WM_KEYUP에서는 문자 메시지 생성 안 함
+
+// 'e' 키 입력:
+WM_KEYDOWN: wParam = VK_E
+TranslateMessage() 호출 → WM_CHAR: wParam = 'e' 큐에 추가
+// ... 반복
+```
+
+##### 5. 언제 TranslateMessage를 호출하지 말아야 할까?
+```cpp
+// 게임에서의 키 입력 처리 - 문자가 아닌 액션용
+while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+    if (msg.message == WM_KEYDOWN || msg.message == WM_KEYUP) {
+        // 게임 액션용 키는 TranslateMessage 건너뛰기
+        // WM_CHAR 메시지를 원하지 않는 경우
+        DispatchMessage(&msg);
+    } else {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+}
+
+// 텍스트 입력이 필요한 경우만 TranslateMessage 사용
+// 예: 채팅창, 이름 입력, 콘솔 명령어 등
+```
+
+#### DispatchMessage의 상세 동작 원리
+
+##### 1. 메시지 라우팅 과정
+```cpp
+LRESULT result = DispatchMessage(&msg);
+
+// 내부적으로 수행하는 작업:
+// 1. msg.hwnd로 윈도우 식별
+// 2. 해당 윈도우의 윈도우 프로시저 함수 포인터 찾기
+// 3. 윈도우 프로시저 호출: WindowProc(hwnd, uMsg, wParam, lParam)
+// 4. 반환값을 DispatchMessage의 반환값으로 전달
+```
+
+##### 2. 윈도우 프로시저에서의 메시지 처리
+```cpp
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    switch (uMsg) {
+    case WM_KEYDOWN:
+        // 가상 키 코드 처리 (게임 액션, 단축키 등)
+        if (wParam == VK_SPACE) {
+            // 스페이스바 액션
+        }
+        return 0;
+        
+    case WM_CHAR:
+        // 문자 입력 처리 (텍스트 편집, 채팅 등)
+        if (wParam >= 32 && wParam <= 126) {  // 출력 가능한 ASCII 문자
+            AddCharacterToTextBuffer((char)wParam);
+        }
+        return 0;
+        
+    default:
+        return DefWindowProc(hwnd, uMsg, wParam, lParam);
+    }
+}
+```
+
+##### 3. 메시지 처리 성능 고려사항
+```cpp
+// 효율적인 메시지 처리
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    // 자주 발생하는 메시지를 먼저 처리
+    switch (uMsg) {
+    case WM_MOUSEMOVE:    // 가장 자주 발생
+        // 빠른 처리
+        return 0;
+        
+    case WM_PAINT:        // 두 번째로 자주 발생
+        // 렌더링 처리
+        return 0;
+        
+    case WM_KEYDOWN:      // 사용자 입력
+    case WM_CHAR:
+        // 입력 처리
+        return 0;
+        
+    case WM_CREATE:       // 한 번만 발생
+    case WM_DESTROY:
+        // 초기화/정리 작업
+        return 0;
+        
+    default:
+        return DefWindowProc(hwnd, uMsg, wParam, lParam);
+    }
+}
+```
+
+#### 실제 사용 예시: 텍스트 에디터
+
+```cpp
+// 간단한 텍스트 입력 처리 예시
+std::wstring g_textBuffer;
+int g_cursorPosition = 0;
+
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    switch (uMsg) {
+    case WM_KEYDOWN:
+        // 특수 키 처리 (문자가 아닌 액션)
+        switch (wParam) {
+        case VK_LEFT:
+            if (g_cursorPosition > 0) g_cursorPosition--;
+            break;
+        case VK_RIGHT:
+            if (g_cursorPosition < g_textBuffer.length()) g_cursorPosition++;
+            break;
+        case VK_BACK:
+            if (g_cursorPosition > 0) {
+                g_textBuffer.erase(g_cursorPosition - 1, 1);
+                g_cursorPosition--;
+            }
+            break;
+        case VK_DELETE:
+            if (g_cursorPosition < g_textBuffer.length()) {
+                g_textBuffer.erase(g_cursorPosition, 1);
+            }
+            break;
+        }
+        InvalidateRect(hwnd, NULL, TRUE);  // 화면 다시 그리기 요청
+        return 0;
+        
+    case WM_CHAR:
+        // 실제 문자 입력 처리
+        if (wParam >= 32) {  // 출력 가능한 문자만
+            g_textBuffer.insert(g_cursorPosition, 1, (wchar_t)wParam);
+            g_cursorPosition++;
+            InvalidateRect(hwnd, NULL, TRUE);
+        }
+        return 0;
+        
+    // ... 다른 메시지 처리 ...
+    }
+    
+    return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+```
+
+**핵심 정리:**
+- `TranslateMessage`: 키보드 하드웨어 신호를 사용자가 의도한 문자로 변환
+- `DispatchMessage`: 변환된 메시지를 적절한 윈도우 프로시저로 전달
+- 메시지 처리 순서: WM_KEYDOWN → (TranslateMessage) → WM_CHAR 큐 추가 → 다음 루프에서 WM_CHAR 처리
 
 ## 윈도우 프로시저 (Window Procedure)
 
